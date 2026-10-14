@@ -1,5 +1,8 @@
-. /w/hunt.ps1
-. /w/tests/mock.ps1
+# Resolve relative to this file so the suite runs the same way in a container,
+# in CI, and from the repo root.
+$root = Split-Path -Parent $PSScriptRoot
+. (Join-Path $root 'hunt.ps1')
+. (Join-Path $PSScriptRoot 'mock.ps1')
 
 $fails = 0
 Write-Host "`n== every play executes =="

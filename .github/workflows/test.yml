@@ -1,0 +1,48 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  logic:
+    name: logic (mocked, ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse check
+        shell: pwsh
+        run: |
+          $errs = $null; $toks = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path ./hunt.ps1), [ref]$toks, [ref]$errs) | Out-Null
+          if ($errs) {
+            $errs | ForEach-Object { "line $($_.Extent.StartLineNumber): $($_.Message)" }
+            throw "$($errs.Count) parse error(s)"
+          }
+          "parse OK - $($toks.Count) tokens"
+      - name: Unit and search tests
+        shell: pwsh
+        run: ./tests/run.ps1
+      - name: Play catalogue tests
+        shell: pwsh
+        run: ./tests/plays.ps1
+
+  windows:
+    name: real event logs (${{ matrix.shell }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # powershell = Windows PowerShell 5.1, the version on most target hosts
+        shell: [powershell, pwsh]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Mocked suites
+        shell: ${{ matrix.shell }}
+        run: ./tests/run.ps1
+      - name: Smoke test against live channels
+        shell: ${{ matrix.shell }}
+        run: ./tests/smoke.ps1

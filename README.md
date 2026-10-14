@@ -1,6 +1,10 @@
 # hunt
 
-Windows event logs, two words at a time.
+**Windows event logs, two words at a time.**
+
+[![tests](https://github.com/iamjoshgilman/hunt/actions/workflows/test.yml/badge.svg)](https://github.com/iamjoshgilman/hunt/actions/workflows/test.yml)
+[![PowerShell 5.1+](https://img.shields.io/badge/PowerShell-5.1%2B-5391FE?logo=powershell&logoColor=white)](https://learn.microsoft.com/en-us/powershell/)
+[![license: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 ```powershell
 hunt sysmon mimikatz
@@ -211,9 +215,31 @@ has no `contains()`, so substring search cannot be pushed down. Narrow with
 
 ## Tests
 
-`tests/` mocks `Get-WinEvent` so the search path can be exercised off-Windows:
+Three suites. The first two mock `Read-HuntRawEvents` — the only function that
+touches the event log — so the whole search path runs anywhere:
+
+```bash
+pwsh -File tests/run.ps1      # units, query logic, search, discovery
+pwsh -File tests/plays.ps1    # every play executes and is well-formed
+pwsh -File tests/smoke.ps1    # Windows only: real channels, nothing mocked
+```
+
+Off-Windows, in a container:
 
 ```bash
 docker run --rm -v "$PWD:/w" -w /w mcr.microsoft.com/powershell:latest \
-    pwsh -NoProfile -File /w/tests/run.ps1
+    pwsh -NoProfile -File tests/run.ps1
 ```
+
+CI runs the mocked suites on Linux and all three on Windows, under both
+Windows PowerShell 5.1 and PowerShell 7. The smoke suite exists because the
+interesting bugs were Windows-only: the event-log XPath dialect rejecting XML
+entities in a time filter, and `TolerateQueryErrors` silently turning a missing
+channel into an empty result.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
+
+Bring your own authorization. This reads local event logs; it does not change
+anything on the host.

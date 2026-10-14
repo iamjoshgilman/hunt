@@ -706,7 +706,9 @@ function Read-HuntRawEvents {
         $Log, [System.Diagnostics.Eventing.Reader.PathType]::LogName, $xpath)
     if ($session) { $query.Session = $session }
     $query.ReverseDirection = (-not $Oldest)     # newest first by default
-    $query.TolerateQueryErrors = $true
+    # Deliberately NOT TolerateQueryErrors: that swallows the missing-channel
+    # error and returns an empty result, so 'hunt sysmon x' on a box without
+    # Sysmon would look like "no hits" instead of "Sysmon is not installed".
     $reader = New-Object System.Diagnostics.Eventing.Reader.EventLogReader $query
     try {
         while ($true) {

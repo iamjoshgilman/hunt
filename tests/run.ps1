@@ -1,5 +1,8 @@
-. /w/hunt.ps1
-. /w/tests/mock.ps1
+# Resolve relative to this file so the suite runs the same way in a container,
+# in CI, and from the repo root.
+$root = Split-Path -Parent $PSScriptRoot
+. (Join-Path $root 'hunt.ps1')
+. (Join-Path $PSScriptRoot 'mock.ps1')
 
 $fails = 0
 function Check($name, $cond, $detail) {
@@ -107,6 +110,10 @@ Check 'alias searches'  (@($h).Count -eq 1) "got $(@($h).Count)"
 $warn = @()
 $h = hunt defender something -WarningVariable warn -WarningAction SilentlyContinue
 Check 'missing log warns' ($warn.Count -ge 1) "warnings: $($warn.Count)"
+Check 'missing log does not return silently' (@($h).Count -eq 0) ''
+$warn = @()
+$h = hunt sysmon something-not-present -WarningVariable warn -WarningAction SilentlyContinue
+Check 'present log does not warn' ($warn.Count -eq 0) "warnings: $($warn -join '; ')"
 
 Write-Host "`n== empty results in every output mode =="
 # a channel that exists but has no matching events
