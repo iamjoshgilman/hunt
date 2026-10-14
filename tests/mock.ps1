@@ -39,42 +39,42 @@ function New-MockEvent {
     return $e
 }
 
-function Get-WinEvent {
+# Stands in for the one function that touches the event log.
+function Read-HuntRawEvents {
     [CmdletBinding()]
     param(
-        [hashtable]$FilterHashtable,
-        [string]$ListLog,
-        [string]$ComputerName,
-        $Credential,
+        [string]$Log,
+        [int[]]$Id,
+        [Nullable[datetime]]$After,
+        [Nullable[datetime]]$Before,
         [switch]$Oldest,
-        [int]$MaxEvents
+        [string]$Computer,
+        $Credential
     )
+    $set = @($script:MockEvents | Where-Object { $_.LogName -eq $Log })
+    if ($set.Count -eq 0) {
+        $ex = New-Object System.IO.FileNotFoundException "There is no event log on the localhost computer with the specified name: $Log"
+        throw $ex
+    }
+    if ($Id)     { $set = @($set | Where-Object { $Id -contains $_.Id }) }
+    if ($After)  { $set = @($set | Where-Object { $_.TimeCreated -ge $After }) }
+    if ($Before) { $set = @($set | Where-Object { $_.TimeCreated -le $Before }) }
+    if ($Oldest) { $set = @($set | Sort-Object TimeCreated) }
+    else         { $set = @($set | Sort-Object TimeCreated -Descending) }
+    foreach ($e in $set) { $e }
+}
+
+# Only used by 'hunt sources' for channel metadata, never per event.
+function Get-WinEvent {
+    [CmdletBinding()]
+    param([hashtable]$FilterHashtable, [string]$ListLog, [string]$ComputerName,
+          $Credential, [switch]$Oldest, [int]$MaxEvents)
     if ($ListLog) {
         $n = @($script:MockEvents | Where-Object { $_.LogName -eq $ListLog }).Count
         if ($n -eq 0) { return }
         return [pscustomobject]@{ LogName = $ListLog; RecordCount = $n }
     }
-    $log = $FilterHashtable['LogName']
-    $set = @($script:MockEvents | Where-Object { $_.LogName -eq $log })
-    if ($set.Count -eq 0) {
-        throw "There is not an event log on the localhost computer with that name: $log"
-    }
-    if ($FilterHashtable.ContainsKey('Id')) {
-        $ids = @($FilterHashtable['Id'])
-        $set = @($set | Where-Object { $ids -contains $_.Id })
-    }
-    if ($FilterHashtable.ContainsKey('StartTime')) {
-        $st = $FilterHashtable['StartTime']
-        $set = @($set | Where-Object { $_.TimeCreated -ge $st })
-    }
-    if ($FilterHashtable.ContainsKey('EndTime')) {
-        $et = $FilterHashtable['EndTime']
-        $set = @($set | Where-Object { $_.TimeCreated -le $et })
-    }
-    if ($set.Count -eq 0) { throw 'No events were found that match the specified selection criteria.' }
-    if ($Oldest) { $set = @($set | Sort-Object TimeCreated) }
-    else         { $set = @($set | Sort-Object TimeCreated -Descending) }
-    foreach ($e in $set) { $e }
+    throw 'Get-WinEvent should no longer be on the search path'
 }
 
 # ------------------------------------------------------------------ fixtures --

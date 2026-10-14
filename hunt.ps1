@@ -412,7 +412,16 @@ function Resolve-HuntSource {
     return @($Name)   # fall through: treat it as a literal channel name
 }
 
+$script:HuntShortCache = @{}
+
 function Get-HuntShortName {
+    [CmdletBinding()] param([string]$Log)
+    if ($script:HuntShortCache.ContainsKey($Log)) { return $script:HuntShortCache[$Log] }
+    $script:HuntShortCache[$Log] = Get-HuntShortNameUncached $Log
+    return $script:HuntShortCache[$Log]
+}
+
+function Get-HuntShortNameUncached {
     [CmdletBinding()] param([string]$Log)
     foreach ($k in $script:HuntSources.Keys) {
         if ($k -eq 'all') { continue }
@@ -444,9 +453,12 @@ function New-HuntRegex {
 }
 
 function ConvertFrom-HuntEventXml {
-    [CmdletBinding()] param($Event)
+    [CmdletBinding()] param($Event, [string]$Xml)
     $d = [ordered]@{}
-    try { $x = [xml]$Event.ToXml() } catch { return $d }
+    if (-not $Xml) {
+        try { $Xml = $Event.ToXml() } catch { return $d }
+    }
+    try { $x = [xml]$Xml } catch { return $d }
     $ed = $x.Event.EventData
     if ($ed -and $ed.Data) {
         $i = 0
@@ -537,10 +549,10 @@ function Format-HuntValue {
 }
 
 function New-HuntRecord {
-    [CmdletBinding()] param($Event, [string]$Log)
+    [CmdletBinding()] param($Event, [string]$Log, [string]$Xml)
     $short = Get-HuntShortName $Log
     $id    = [int]$Event.Id
-    $data  = ConvertFrom-HuntEventXml $Event
+    $data  = ConvertFrom-HuntEventXml -Event $Event -Xml $Xml
     $key   = $short + ':' + $id
 
     $parts = New-Object Collections.ArrayList
@@ -579,7 +591,7 @@ function New-HuntRecord {
     elseif ($tc) { $ts = $tc.ToString('MM-dd HH:mm') }
     else { $ts = '' }
 
-    $o = [pscustomobject]@{
+    $h = [ordered]@{
         Time        = $ts
         Id          = $id
         Event       = $name
@@ -589,7 +601,6 @@ function New-HuntRecord {
         Source      = $short
         Computer    = $Event.MachineName
         Provider    = $Event.ProviderName
-        Level       = $Event.LevelDisplayName
         RecordId    = $Event.RecordId
         Data        = $data
         Record      = $Event
@@ -597,16 +608,21 @@ function New-HuntRecord {
 
     # Promote every event-data field to a real property, so you can do
     # -Show Image,CommandLine, -Count TargetUserName, or $r.ParentImage.
+    # Built into the hashtable rather than via Add-Member: one object
+    # construction instead of a member add per field, per event.
     foreach ($k in $data.Keys) {
         if ([string]::IsNullOrWhiteSpace($k)) { continue }
         $pname = $k -replace '[^A-Za-z0-9_]', ''
         if (-not $pname) { continue }
         if ($script:HuntReserved -contains $pname) { $pname = 'd_' + $pname }
-        if ($o.PSObject.Properties[$pname]) { continue }
-        Add-Member -InputObject $o -MemberType NoteProperty -Name $pname -Value $data[$k]
+        if ($h.Contains($pname)) { continue }
+        $h[$pname] = $data[$k]
     }
 
-    Add-Member -InputObject $o -MemberType ScriptProperty -Name Message -Value { $this.Record.Message }
+    $o = [pscustomobject]$h
+    # Message and Level both cost a provider-metadata lookup, so they stay lazy.
+    Add-Member -InputObject $o -MemberType ScriptProperty -Name Message -Value { try { $this.Record.Message } catch { '' } }
+    Add-Member -InputObject $o -MemberType ScriptProperty -Name Level -Value { try { $this.Record.LevelDisplayName } catch { '' } }
     $o.PSObject.TypeNames.Insert(0, 'Hunt.Event')
     $set = New-Object Management.Automation.PSPropertySet 'DefaultDisplayPropertySet', ([string[]]@('Time','Id','Event','Detail'))
     Add-Member -InputObject $o -MemberType MemberSet -Name PSStandardMembers -Value ([Management.Automation.PSMemberInfo[]]@($set))
@@ -639,6 +655,82 @@ function Test-HuntField {
 }
 
 # ------------------------------------------------------------------- engine --
+# Get-WinEvent costs ~20ms per event on a real host, which turns a full-channel
+# keyword scan into a 10-minute wait. EventLogReader is the API it wraps and
+# runs ~80x faster (measured: 0.23ms vs 21ms per event on Win10 + Sysmon), so
+# the engine drives that directly. Event id and time window are still pushed
+# down, now as structured XPath.
+
+function New-HuntXPath {
+    [CmdletBinding()]
+    param([int[]]$Id, [Nullable[datetime]]$After, [Nullable[datetime]]$Before)
+    $conds = @()
+    if ($Id) {
+        $parts = foreach ($i in $Id) { "EventID=$i" }
+        $conds += '(' + ($parts -join ' or ') + ')'
+    }
+    $t = @()
+    # Raw >= and <=, not XML entities: EventLogQuery takes a bare XPath string
+    # and rejects &gt;= with 'The specified query is invalid' (verified on Win10).
+    if ($After)  { $t += "@SystemTime>='" + $After.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ') + "'" }
+    if ($Before) { $t += "@SystemTime<='" + $Before.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ') + "'" }
+    if ($t.Count -gt 0) { $conds += 'TimeCreated[' + ($t -join ' and ') + ']' }
+    if ($conds.Count -eq 0) { return '*' }
+    return '*[System[' + ($conds -join ' and ') + ']]'
+}
+
+# The one place that touches the event log. Mocked in tests.
+function Read-HuntRawEvents {
+    [CmdletBinding()]
+    param(
+        [string]$Log,
+        [int[]]$Id,
+        [Nullable[datetime]]$After,
+        [Nullable[datetime]]$Before,
+        [switch]$Oldest,
+        [string]$Computer,
+        $Credential
+    )
+    $xpath = New-HuntXPath -Id $Id -After $After -Before $Before
+    $session = $null
+    if ($Computer -and $Computer -notin @('.', 'localhost', $env:COMPUTERNAME)) {
+        if ($Credential) {
+            $session = New-Object System.Diagnostics.Eventing.Reader.EventLogSession(
+                $Computer, $Credential.GetNetworkCredential().Domain, $Credential.UserName,
+                $Credential.Password, [System.Diagnostics.Eventing.Reader.SessionAuthentication]::Default)
+        } else {
+            $session = New-Object System.Diagnostics.Eventing.Reader.EventLogSession($Computer)
+        }
+    }
+    $query = New-Object System.Diagnostics.Eventing.Reader.EventLogQuery(
+        $Log, [System.Diagnostics.Eventing.Reader.PathType]::LogName, $xpath)
+    if ($session) { $query.Session = $session }
+    $query.ReverseDirection = (-not $Oldest)     # newest first by default
+    $query.TolerateQueryErrors = $true
+    $reader = New-Object System.Diagnostics.Eventing.Reader.EventLogReader $query
+    try {
+        while ($true) {
+            $e = $reader.ReadEvent()
+            if ($null -eq $e) { break }
+            $e
+        }
+    }
+    finally {
+        $reader.Dispose()
+        if ($session) { $session.Dispose() }
+    }
+}
+
+# Keywords match event data, so trim the <System> block off the front rather
+# than matching provider names and GUIDs by accident.
+function Get-HuntMatchText {
+    [CmdletBinding()] param([string]$Xml)
+    if (-not $Xml) { return '' }
+    $i = $Xml.IndexOf('<EventData')
+    if ($i -lt 0) { $i = $Xml.IndexOf('<UserData') }
+    if ($i -lt 0) { return $Xml }
+    return $Xml.Substring($i)
+}
 
 function Search-HuntEvents {
     [CmdletBinding()]
@@ -649,6 +741,7 @@ function Search-HuntEvents {
         [string[]]$Field,
         [string]$MatchRegex,
         [string]$NotRegex,
+        [string]$CountField,
         [Nullable[datetime]]$After,
         [Nullable[datetime]]$Before,
         [int]$Max = 40,
@@ -662,41 +755,65 @@ function Search-HuntEvents {
     $stepNot = $null; if ($NotRegex)   { $stepNot = New-HuntRegex $NotRegex }
     $missing = New-Object Collections.ArrayList
     $denied  = $false
+    $unreachable = $false
     $touched = 0
+
+    # Aggregating only needs one field, so skip building a record per event and
+    # pull the value straight out of the XML. Over a few thousand events the
+    # difference is minutes, not milliseconds.
+    # A positive Name=regex can only match if the pattern appears somewhere in
+    # the event data, so test it against the cheap text first. Without this, a
+    # field filter forces an XML parse of every event in the channel just to
+    # discover it does not match. Negated specs cannot be pre-filtered.
+    $fieldPre = @()
+    if ($Field) {
+        foreach ($spec in $Field) {
+            if ([string]::IsNullOrWhiteSpace($spec)) { continue }
+            $i = $spec.IndexOfAny([char[]]@('=', ':'))
+            if ($i -lt 1) { continue }
+            if ($spec.Substring(0, $i).Trim().EndsWith('!')) { continue }
+            $fieldPre += (New-HuntRegex $spec.Substring($i + 1).Trim())
+        }
+    }
+
+    $cfRx = $null
+    if ($CountField) {
+        $pat = '<Data Name=[''"]' + [regex]::Escape($CountField) + '[''"]\s*>(.*?)</Data>'
+        $cfRx = New-Object Text.RegularExpressions.Regex ($pat, ([Text.RegularExpressions.RegexOptions]'Singleline, IgnoreCase'))
+    }
 
     foreach ($comp in $Computers) {
         foreach ($log in $Logs) {
             if ($out.Count -ge $Max) { break }
             $remaining = $Max - $out.Count
 
-            $ht = @{ LogName = $log }
-            if ($Id)     { $ht['Id'] = $Id }
-            if ($After)  { $ht['StartTime'] = $After }
-            if ($Before) { $ht['EndTime']   = $Before }
-
-            $gw = @{ FilterHashtable = $ht; ErrorAction = 'Stop' }
-            if ($comp -and $comp -notin @('.','localhost',$env:COMPUTERNAME)) { $gw['ComputerName'] = $comp }
-            if ($Credential) { $gw['Credential'] = $Credential }
-            if ($Oldest)     { $gw['Oldest'] = $true }
-
             try {
-                $hits = Get-WinEvent @gw | ForEach-Object {
+                $hits = Read-HuntRawEvents -Log $log -Id $Id -After $After -Before $Before `
+                            -Oldest:$Oldest -Computer $comp -Credential $Credential | ForEach-Object {
                     $e = $_
-                    # Cheap pre-filter: event-data values without paying for an
-                    # XML parse or a provider message lookup on every record.
-                    $text = ''
-                    if ($e.Properties -and $e.Properties.Count -gt 0) {
-                        $vals = foreach ($pv in $e.Properties) { [string]$pv.Value }
-                        $text = $vals -join "`n"
-                    }
-                    if ([string]::IsNullOrWhiteSpace($text)) {
-                        try { $text = $e.ToXml() } catch { $text = '' }
-                    }
+                    # One ToXml per event is the whole per-event cost; everything
+                    # filters against that string before any XML is parsed.
+                    try { $xmlText = $e.ToXml() } catch { $xmlText = '' }
+                    $text = Get-HuntMatchText $xmlText
                     if ($stepNot -and $stepNot.IsMatch($text)) { return }
                     if ($stepRx  -and -not $stepRx.IsMatch($text)) { return }
                     if (-not (Test-HuntQuery $Query $text)) { return }
+                    foreach ($fr in $fieldPre) { if (-not $fr.IsMatch($text)) { return } }
 
-                    $rec = New-HuntRecord -Event $e -Log $log
+                    if ($cfRx) {
+                        $m = $cfRx.Match($xmlText)
+                        $v = '(none)'
+                        if ($m.Success) {
+                            $v = $m.Groups[1].Value
+                            if ($v.IndexOf('&') -ge 0) {
+                                $v = $v.Replace('&lt;','<').Replace('&gt;','>').Replace('&quot;','"').Replace('&apos;',"'").Replace('&amp;','&')
+                            }
+                        }
+                        if ([string]::IsNullOrWhiteSpace($v)) { $v = '(none)' }
+                        return [pscustomobject]@{ CountValue = $v }
+                    }
+
+                    $rec = New-HuntRecord -Event $e -Log $log -Xml $xmlText
                     if ($Field -and -not (Test-HuntField -Record $rec -Field $Field)) { return }
                     $rec
                 } | Select-Object -First $remaining
@@ -705,10 +822,17 @@ function Search-HuntEvents {
                 $touched++
             }
             catch {
-                $msg = [string]$_.Exception.Message
-                if     ($msg -match 'No events were found') { $touched++ }
+                $ex = $_.Exception
+                while ($ex.InnerException) { $ex = $ex.InnerException }
+                $tn  = $ex.GetType().Name
+                $msg = [string]$ex.Message
+                if     ($tn -eq 'EventLogNotFoundException') { [void]$missing.Add($log) }
+                elseif ($tn -eq 'UnauthorizedAccessException') { $denied = $true }
                 elseif ($msg -match 'unauthorized|Access is denied') { $denied = $true }
-                elseif ($msg -match 'not an event log|could not be found|does not exist') { [void]$missing.Add($log) }
+                elseif ($msg -match 'not an event log|could not be found|does not exist|no event log') { [void]$missing.Add($log) }
+                elseif ($msg -match 'RPC server is unavailable|cannot be found.*network|network path') {
+                    $unreachable = $true
+                }
                 else   { Write-Warning ("{0}: {1}" -f $log, $msg) }
             }
         }
@@ -716,6 +840,11 @@ function Search-HuntEvents {
 
     if ($denied) {
         Write-Warning 'Access denied on at least one log. The Security log needs an elevated session.'
+    }
+    if ($unreachable) {
+        Write-Warning ("Could not reach the event log service on {0}. Remote reads need the " +
+            "'Remote Event Log Management' firewall rules enabled on the target: " +
+            "netsh advfirewall firewall set rule group=`"Remote Event Log Management`" new enable=yes" -f ($Computers -join ', '))
     }
     if ($touched -eq 0 -and $missing.Count -gt 0) {
         foreach ($m in ($missing | Select-Object -Unique)) {
@@ -799,11 +928,16 @@ function Invoke-Hunt {
         Show-HuntIds -Term $Query; return
     }
     if ($sub -in @('play','plays','p','run')) {
+        # 'plays <text>' is a search of the catalogue; 'play <name>' runs one.
+        # Only the second should complain about an unknown name.
+        $listing = ($sub -eq 'plays')
         $name = ''
         if ($Query -and $Query.Count -gt 0) { $name = $Query[0].ToLower() }
         if (-not $name -or -not $script:HuntPlays.Contains($name)) {
             Show-HuntPlays -Filter $Query
-            if ($name) { Write-Warning "No play called '$name'. Closest matches listed above." }
+            if ($name -and -not $listing) {
+                Write-Warning "No play called '$name'. Closest matches listed above."
+            }
             return
         }
         $rest = @()
@@ -829,8 +963,11 @@ function Invoke-Hunt {
     $effMax = $Max
     if ($Count) { $effMax = 100000 }
 
+    $countFast = ''
+    if ($Count -and -not $Field) { $countFast = $Count }
+
     $results = Search-HuntEvents -Logs $logs -Id $Id -Query $parsed -Field $Field `
-        -After $afterTime -Before $Before -Max $effMax `
+        -CountField $countFast -After $afterTime -Before $Before -Max $effMax `
         -Computers $ComputerName -Credential $Credential -Oldest:$Oldest
 
     return Format-HuntResult -Results $results -Count $Count -Show $Show -Full:$Full -Raw:$Raw -Max $Max
@@ -876,8 +1013,11 @@ function Invoke-HuntPlay {
         $stepNot   = $null; if ($step.ContainsKey('Not'))   { $stepNot   = [string]$step.Not }
         if ($resolvedCount -and -not $afterTime) { $afterTime = (Get-Date).AddDays(-7) }
 
+        $countFast = ''
+        if ($resolvedCount -and -not $fields) { $countFast = $resolvedCount }
+
         $r = Search-HuntEvents -Logs $logs -Id $step.Id -Query $parsed -Field $fields `
-            -MatchRegex $stepMatch -NotRegex $stepNot `
+            -MatchRegex $stepMatch -NotRegex $stepNot -CountField $countFast `
             -After $afterTime -Before $before -Max $effMax `
             -Computers $comps -Credential $cred -WarningAction SilentlyContinue
         foreach ($x in $r) { [void]$all.Add($x) }
@@ -887,7 +1027,8 @@ function Invoke-HuntPlay {
         Write-Host ("no hits for play '{0}' - {1}" -f $Name, $play.Desc) -ForegroundColor DarkGray
         return
     }
-    $sorted = $all | Sort-Object TimeCreated -Descending
+    $sorted = $all
+    if (-not $resolvedCount) { $sorted = $all | Sort-Object TimeCreated -Descending }
     return Format-HuntResult -Results $sorted -Count $resolvedCount -Show $show `
         -Full:([bool]$o['Full']) -Raw:([bool]$o['Raw']) -Max $max
 }
@@ -896,15 +1037,21 @@ function Format-HuntResult {
     [CmdletBinding()]
     param($Results, [string]$Count, [string[]]$Show, [switch]$Full, [switch]$Raw, [int]$Max = 40)
 
-    $list = @($Results)
+    # An empty ArrayList unrolls to nothing on return, so $Results arrives as
+    # $null and @($null) has Count 1. Strip nulls before the emptiness check.
+    $list = @($Results | Where-Object { $null -ne $_ })
     if ($list.Count -eq 0) { return }
 
     if ($Count) {
         $name = $Count
+        $fast = $null -ne $list[0].PSObject.Properties['CountValue']
         return $list | ForEach-Object {
-            $v = $null
-            if ($_.Data.Contains($name)) { $v = [string]$_.Data[$name] }
-            elseif ($_.PSObject.Properties[$name]) { $v = [string]$_.$name }
+            if ($fast) { $v = [string]$_.CountValue }
+            else {
+                $v = $null
+                if ($_.Data -and $_.Data.Contains($name)) { $v = [string]$_.Data[$name] }
+                elseif ($_.PSObject.Properties[$name]) { $v = [string]$_.$name }
+            }
             if ([string]::IsNullOrWhiteSpace($v)) { $v = '(none)' }
             [pscustomobject]@{ Value = $v }
         } | Group-Object Value | Sort-Object Count -Descending |
@@ -974,7 +1121,7 @@ function Show-HuntHelp {
     Write-Host ''
     Write-Host '  START HERE' -ForegroundColor Yellow
     Write-HuntRow 'hunt where X'  'you know WHAT you want, not where it lives  <- start here'
-    Write-HuntRow 'hunt plays'    'the 40-odd prebuilt hunts, by name'
+    Write-HuntRow 'hunt plays'    'the 42 prebuilt hunts, by name'
     Write-HuntRow 'hunt sources'  'which logs exist on this host, and how full they are'
     Write-HuntRow 'hunt ids X'    'cheat sheet: "hunt ids sysmon", or "hunt ids 4625"'
     Write-Host ''
@@ -1030,7 +1177,10 @@ function Show-HuntSources {
             Covers = $src.Desc
         }
     }
-    $rows | Format-Table -AutoSize -Wrap
+    # Render into the information stream too, or the table lands after the
+    # footer when both streams are interleaved by the host.
+    Write-Host (($rows | Format-Table -AutoSize -Wrap | Out-String).TrimEnd())
+    Write-Host ''
     $aliasText = ($script:HuntAliases.Keys | Sort-Object | ForEach-Object { "$_=$($script:HuntAliases[$_])" }) -join '  '
     Write-Host '  aliases: ' -ForegroundColor DarkGray -NoNewline
     Write-Host $aliasText -ForegroundColor DarkGray

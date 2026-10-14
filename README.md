@@ -33,6 +33,11 @@ iex (irm https://raw.githubusercontent.com/iamjoshgilman/hunt/main/hunt.ps1)
 
 Or drop `hunt.ps1` next to you and `. .\hunt.ps1`.
 
+The `iex` form is the one to reach for on a locked-down host: dot-sourcing a
+`.ps1` from disk is subject to execution policy and fails with
+*"running scripts is disabled on this system"*, while `iex` of a string is not.
+Nothing touches disk either way.
+
 ## The three commands that matter
 
 The hard part of event-log hunting is not the syntax, it is knowing *where* to
@@ -41,7 +46,7 @@ why "Defender detected malware" is ID 1116 but is **not** in the Security log.
 
 ```powershell
 hunt where ransomware      # you know WHAT you want, not where it lives
-hunt plays                 # 47 prebuilt hunts, by name
+hunt plays                 # 42 prebuilt hunts, by name
 hunt ids 4625              # which log is this ID in, and what is it?
 ```
 
@@ -157,14 +162,52 @@ is used as a literal channel name:
 hunt "Microsoft-Windows-TaskScheduler/Operational" -Id 106
 ```
 
+## Speed
+
+`hunt` drives `EventLogReader` rather than `Get-WinEvent`. On a Windows 10 host
+with a 36,000-event Sysmon channel, measured:
+
+| | per event | full channel scan |
+|---|---|---|
+| `Get-WinEvent` | 21 ms | ~13 minutes |
+| `EventLogReader` | 0.23 ms | 18 seconds |
+
+`Get-WinEvent` is the convenient wrapper around the same API, and it is ~80x
+slower per record — enough to make a bare `hunt sysmon mimikatz` look hung.
+Measured numbers on that host:
+
+```
+sysmon -Id 1 -Max 40 (id pushed into the query)      1.09s
+sysmon powershell -Max 5 (matches, exits early)      0.08s
+sysmon zzqqxx (no match, full 36k scan)             18.42s
+security -Id 4624 -Count TargetUserName -Last 1d     0.42s
+play persist -Max 5                                  3.55s
+```
+
+Three things keep it quick:
+
+- **`-Id` and the time window are pushed down** into the event-log query as
+  XPath, so unmatched events are never read.
+- **Keywords match a single `ToXml()` string** per event — no XML parse and no
+  provider message lookup unless an event actually matches.
+- **`-Field Name=regex` pre-filters on that same string** before parsing, since
+  a value can only match the field if it appears in the event at all.
+
+Keyword matching has to happen client-side: the Windows event-log XPath dialect
+has no `contains()`, so substring search cannot be pushed down. Narrow with
+`-Id` or `-Last` when a channel is large.
+
 ## Notes
 
 - The Security log needs an elevated session. `hunt` says so rather than
   throwing a raw access-denied.
-- `-Id` and the time window are pushed down into the event-log query. Keyword
-  matching happens client-side, because the Windows event-log XPath dialect has
-  no `contains()`.
 - No Sysmon on the box? `hunt` tells you and points at `hunt security -Id 4688`.
+- `-On <host>` needs the *Remote Event Log Management* firewall rules enabled on
+  the target; `hunt` prints the `netsh` line to fix it rather than an RPC error.
+- A keyword can hit channels you did not have in mind. `hunt sysmon certutil`
+  matches Amcache registry writes (ID 13) as well as process creations, because
+  the binary name genuinely appears in both. Add `-Id 1` when you only want
+  execution.
 
 ## Tests
 

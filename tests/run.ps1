@@ -37,6 +37,22 @@ $q = New-HuntQuery @('C:\Users\bob')
 Check 'bad regex -> literal' ((Test-HuntQuery $q 'file at C:\Users\bob\x.txt') -and -not (Test-HuntQuery $q 'C:/Users/bob')) ''
 Check 'empty query is null' ($null -eq (New-HuntQuery @())) ''
 
+Write-Host "`n== xpath construction =="
+Check 'no filter'    ((New-HuntXPath) -eq '*') "got: $(New-HuntXPath)"
+$xp = New-HuntXPath -Id @(1,3)
+Check 'ids'          ($xp -eq '*[System[(EventID=1 or EventID=3)]]') "got: $xp"
+$xp = New-HuntXPath -After ([datetime]'2026-10-12T00:00:00Z')
+Check 'raw >= not entity' ($xp -match '@SystemTime>=' -and $xp -notmatch '&gt;') "got: $xp"
+Check 'utc iso8601'  ($xp -match "'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z'") "got: $xp"
+$xp = New-HuntXPath -Id @(4625) -After ([datetime]'2026-10-12T00:00:00Z') -Before ([datetime]'2026-10-13T00:00:00Z')
+Check 'id + both bounds' ($xp -match 'EventID=4625' -and $xp -match '>=' -and $xp -match '<=' -and $xp -match ' and ') "got: $xp"
+
+Write-Host "`n== match text excludes the System block =="
+$x = '<Event><System><Provider Name="Microsoft-Windows-Sysmon"/><Computer>WS01</Computer></System><EventData><Data Name="Image">x.exe</Data></EventData></Event>'
+$mt = Get-HuntMatchText $x
+Check 'keeps event data'   ($mt -match 'x\.exe') ''
+Check 'drops system block' ($mt -notmatch 'WS01' -and $mt -notmatch 'Microsoft-Windows-Sysmon') "got: $mt"
+
 Write-Host "`n== source resolution =="
 Check 'alias sec'     ((Resolve-HuntSource 'sec') -contains 'Security') ''
 Check 'alias ps'      ((Resolve-HuntSource 'ps') -contains 'Microsoft-Windows-PowerShell/Operational') ''
@@ -92,6 +108,18 @@ $warn = @()
 $h = hunt defender something -WarningVariable warn -WarningAction SilentlyContinue
 Check 'missing log warns' ($warn.Count -ge 1) "warnings: $($warn.Count)"
 
+Write-Host "`n== empty results in every output mode =="
+# a channel that exists but has no matching events
+Check 'list empty'    (@(hunt sysmon -Id 1 zzqqxxnomatch).Count -eq 0) ''
+Check 'count empty'   (@(hunt sysmon -Id 1 zzqqxxnomatch -Count Image).Count -eq 0) ''
+Check 'raw empty'     (@(hunt sysmon -Id 1 zzqqxxnomatch -Raw).Count -eq 0) ''
+Check 'full empty'    (@(hunt sysmon -Id 1 zzqqxxnomatch -Full).Count -eq 0) ''
+Check 'show empty'    (@(hunt sysmon -Id 1 zzqqxxnomatch -Show Image).Count -eq 0) ''
+Check 'field empty'   (@(hunt sysmon -Id 1 -Field 'Image=zzqqxxnomatch').Count -eq 0) ''
+Check 'count no match on real id' (@(hunt security -Id 9999 -Count TargetUserName).Count -eq 0) ''
+Check 'play empty'    (@(hunt play dcsync).Count -eq 0) ''
+Check 'formatter null-safe' ($null -eq (Format-HuntResult -Results $null -Count 'X')) ''
+
 Write-Host "`n== plays =="
 $h = hunt play creds
 Check 'play creds'    (@($h).Count -eq 1 -and $h.SourceImage -match 'mimikatz') "got $(@($h).Count)"
@@ -137,6 +165,12 @@ $out = (hunt plays cred 6>&1 | Out-String)
 Check 'plays filtered' ($out -match 'creds') ''
 $out = (hunt play nosuchplay 6>&1 | Out-String)
 Check 'bad play lists' ($out -match 'PLAYS') ''
+$warn = @()
+hunt plays cred -WarningVariable warn -WarningAction SilentlyContinue 6>&1 | Out-Null
+Check 'plays search does not warn' ($warn.Count -eq 0) "warnings: $($warn -join '; ')"
+$warn = @()
+hunt play cred -WarningVariable warn -WarningAction SilentlyContinue 6>&1 | Out-Null
+Check 'play run warns on typo' ($warn.Count -ge 1) ''
 $out = (hunt 6>&1 | Out-String)
 Check 'bare help'      ($out -match 'GRAMMAR' -and $out -match 'hunt where') ''
 $out = (hunt help 6>&1 | Out-String)
