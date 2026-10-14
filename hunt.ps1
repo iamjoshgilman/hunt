@@ -180,12 +180,14 @@ $script:HuntPlays = [ordered]@{
     creds = [pscustomobject]@{ Desc = 'LSASS process access - the credential-theft smoke alarm'
         Steps = @( @{ S='sysmon'; Id=@(10); Field=@('TargetImage=lsass\.exe'); Not='svchost\.exe|wmiprvse\.exe|MsMpEng\.exe|csrss\.exe|lsm\.exe|taskmgr\.exe' } ) }
 
-    dumps = [pscustomobject]@{ Desc = 'Credential dumping: LSASS access plus dump files hitting disk'
+    # RawAccessRead (Event 9) is deliberately left out - it fires constantly for
+    # legitimate volume access and floods the result, burying the Event 10/11
+    # signal. Hunt it directly when you want it: hunt sysmon -Id 9
+    dumps = [pscustomobject]@{ Desc = 'Credential dumping: LSASS access and dump files hitting disk'
         Steps = @(
-            @{ S='sysmon'; Id=@(10); Field=@('TargetImage=lsass\.exe') }
-            @{ S='sysmon'; Id=@(11); Field=@('TargetFilename=\.dmp$|lsass|SAM$|ntds\.dit|SYSTEM$|SECURITY$') }
-            @{ S='sysmon'; Id=@(1);  Match='procdump|comsvcs.*MiniDump|rundll32.*MiniDump|nanodump|lsassy|reg.*save.*(sam|system|security)|ntdsutil|vssadmin.*create' }
-            @{ S='sysmon'; Id=@(9) } ) }
+            @{ S='sysmon'; Id=@(10); Field=@('TargetImage=lsass\.exe'); Not='svchost\.exe|wmiprvse\.exe|MsMpEng\.exe|csrss\.exe|lsm\.exe' }
+            @{ S='sysmon'; Id=@(11); Field=@('TargetFilename=\.dmp$|ntds\.dit|\\(SAM|SYSTEM|SECURITY)$') }
+            @{ S='sysmon'; Id=@(1);  Match='procdump|comsvcs.*MiniDump|rundll32.*MiniDump|nanodump|lsassy|reg.*save.*(sam|system|security)|ntdsutil|vssadmin.*create' } ) }
 
     persist = [pscustomobject]@{ Desc = 'Autostart persistence: run keys, services, startup folder, tasks'
         Steps = @(
@@ -806,14 +808,13 @@ function Search-HuntEvents {
             $i = $spec.IndexOfAny([char[]]@('=', ':'))
             if ($i -lt 1) { continue }
             if ($spec.Substring(0, $i).Trim().EndsWith('!')) { continue }
-            # The cheap gate runs against every field value joined together, so
-            # a field anchored with ^ or $ (e.g. ImageLoaded=clrjit\.dll$) would
-            # never match here even when the field itself does - the value is not
-            # at the start/end of the blob. Strip anchors for the gate only; the
-            # exact anchored match still happens in Test-HuntField per field.
-            $pat = $spec.Substring($i + 1).Trim()
-            if ($pat.StartsWith('^')) { $pat = $pat.Substring(1) }
-            if ($pat.EndsWith('$') -and -not $pat.EndsWith('\$')) { $pat = $pat.Substring(0, $pat.Length - 1) }
+            # The gate runs against the event's raw XML, which ends in '>' and
+            # has each value buried mid-string. A pattern anchored with ^ or $
+            # anywhere - even mid-alternation like '\.dmp$|ntds\.dit' - would
+            # then never match the gate even when the field value does. Strip
+            # every unescaped anchor for the gate; the exact anchored match
+            # still runs per field in Test-HuntField.
+            $pat = $spec.Substring($i + 1).Trim() -replace '(?<!\\)[$^]', ''
             $fieldPre += (New-HuntRegex $pat)
         }
     }
@@ -826,7 +827,29 @@ function Search-HuntEvents {
 
     $targets = $Logs
     $isFile  = $false
-    if ($Path) { $targets = $Path; $isFile = $true; $Computers = @('.') }
+    if ($Path) {
+        # Resolve wildcards and relative paths, and expand a directory to every
+        # .evtx inside it (recursively) - how the task is usually phrased,
+        # "traverse all logs in the directory". Done here so both plain -Path
+        # queries and plays run through the same expansion.
+        $expanded = New-Object Collections.ArrayList
+        foreach ($p in $Path) {
+            $hits = @(Resolve-Path -Path $p -ErrorAction SilentlyContinue)
+            if ($hits.Count -eq 0) { Write-Warning "no such path: $p"; continue }
+            foreach ($h in $hits) {
+                if (Test-Path -LiteralPath $h.Path -PathType Container) {
+                    $kids = @(Get-ChildItem -LiteralPath $h.Path -Recurse -Filter *.evtx -File -ErrorAction SilentlyContinue)
+                    if ($kids.Count -eq 0) { Write-Warning "no .evtx files under $($h.Path)" }
+                    foreach ($k in $kids) { [void]$expanded.Add($k.FullName) }
+                } else {
+                    [void]$expanded.Add($h.Path)
+                }
+            }
+        }
+        $targets = $expanded
+        $isFile = $true
+        $Computers = @('.')
+    }
 
     foreach ($comp in $Computers) {
         foreach ($log in $targets) {
@@ -1079,14 +1102,8 @@ function Invoke-HuntFile {
         [string[]]$Field, [string]$Count, [string[]]$Show,
         [switch]$Full, [switch]$Raw, [switch]$Oldest
     )
-    $resolved = @()
-    foreach ($p in $Path) {
-        $found = @(Resolve-Path -Path $p -ErrorAction SilentlyContinue)
-        if ($found.Count -eq 0) { Write-Warning "No such file: $p"; continue }
-        foreach ($f in $found) { $resolved += $f.Path }
-    }
-    if ($resolved.Count -eq 0) { return }
-
+    # Path resolution and directory expansion happen in Search-HuntEvents, so
+    # both this and the play path get the same behaviour. Pass through as-is.
     $afterTime = $After
     if ($Last) {
         $span = ConvertTo-HuntTimeSpan $Last
@@ -1097,7 +1114,7 @@ function Invoke-HuntFile {
     $countFast = ''
     if ($Count -and -not $Field) { $countFast = $Count }
 
-    $results = Search-HuntEvents -Path $resolved -Id $Id -Query (New-HuntQuery -Terms $Terms) `
+    $results = Search-HuntEvents -Path $Path -Id $Id -Query (New-HuntQuery -Terms $Terms) `
         -Field $Field -CountField $countFast -After $afterTime -Before $Before `
         -Max $effMax -Oldest:$Oldest
     return Format-HuntResult -Results $results -Count $Count -Show $Show -Full:$Full -Raw:$Raw -Max $Max
@@ -1158,6 +1175,23 @@ function Invoke-HuntPlay {
         Write-Host ("no hits for play '{0}' - {1}" -f $Name, $play.Desc) -ForegroundColor DarkGray
         return
     }
+    # A play's steps can overlap - a hijack DLL is both unsigned and in a drop
+    # dir, so it matches two steps and would be listed twice. Drop repeats of
+    # the same underlying event. Not for the count path, whose rows are bare
+    # values with no record identity.
+    if (-not $resolvedCount -and $all.Count -gt 1) {
+        $seen = @{}
+        $unique = New-Object Collections.ArrayList
+        foreach ($x in $all) {
+            $key = '{0}|{1}|{2}|{3}' -f $x.Source, $x.Id, $x.RecordId,
+                   $(if ($x.TimeCreated) { $x.TimeCreated.Ticks } else { 0 })
+            if ($seen.ContainsKey($key)) { continue }
+            $seen[$key] = $true
+            [void]$unique.Add($x)
+        }
+        $all = $unique
+    }
+
     $sorted = $all
     if (-not $resolvedCount) { $sorted = $all | Sort-Object TimeCreated -Descending }
     return Format-HuntResult -Results $sorted -Count $resolvedCount -Show $show `
@@ -1280,9 +1314,10 @@ function Show-HuntHelp {
     Write-HuntRow '-Full'        'include the rendered event message'                14 DarkGray
     Write-HuntRow '-Raw'         'emit objects for the pipeline instead of a table'  14 DarkGray
     Write-HuntRow '-On host1'    'run against another machine (needs rights)'        14 DarkGray
-    Write-HuntRow '-Path x.evtx' 'read a saved export instead of a live channel'     14 DarkGray
+    Write-HuntRow '-Path x.evtx' 'a saved export or a folder of them (expands .evtx)' 14 DarkGray
     Write-Host ''
-    Write-Host '  Tab completes sources, play names, event ids and field names.' -ForegroundColor DarkGray
+    Write-Host '  Long values truncate in the table - add | Format-List (or -Full / -Raw)' -ForegroundColor DarkGray
+    Write-Host '  to see them in full. Tab completes sources, plays, event ids and fields.' -ForegroundColor DarkGray
     Write-Host ''
     Write-Host '  Keywords match event DATA (command lines, paths, users, IPs), not the' -ForegroundColor DarkGray
     Write-Host '  rendered description. Regex works; if it will not compile it is treated' -ForegroundColor DarkGray

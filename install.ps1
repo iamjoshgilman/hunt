@@ -30,6 +30,8 @@ param(
     [string]$Source,                   # serve a local hunt.ps1 instead of fetching
     [Parameter(ParameterSetName = 'Remote')]
     [switch]$Curl,                     # emit a curl.exe target command
+    [Parameter(ParameterSetName = 'Remote')]
+    [switch]$Keep,                     # keep serving after the first pull
 
     # --- install mode -------------------------------------------------------
     [Parameter(ParameterSetName = 'Install')]
@@ -116,7 +118,7 @@ function Copy-ToClipboard([string]$Text) {
 }
 
 function Start-HuntStage {
-    param([byte[]]$Payload, [int]$Port, [string]$RequestPath)
+    param([byte[]]$Payload, [int]$Port, [string]$RequestPath, [switch]$Keep)
     $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Any, $Port)
     $listener.Start()
     $ok = "HTTP/1.0 200 OK`r`nContent-Type: text/plain; charset=utf-8`r`n" +
@@ -142,7 +144,10 @@ function Start-HuntStage {
                     $stream.Write($Payload, 0, $Payload.Length)
                     $stream.Flush()
                     $served++
+                    $script:HuntLastClient = $who
                     Write-Host ("  ok  {0} pulled {1:N0} bytes" -f $who, $Payload.Length) -ForegroundColor Green
+                    # One good pull is the job; stop unless asked to stay up.
+                    if (-not $Keep) { $client.Close(); break }
                 } else {
                     $stream.Write($notFound, 0, $notFound.Length)
                     Write-Host ("  --  {0} asked for {1}  (404)" -f $who, $reqPath) -ForegroundColor DarkGray
@@ -156,7 +161,11 @@ function Start-HuntStage {
     } finally {
         $listener.Stop()
         Write-Host ''
-        Write-Host ("  stopped after {0} transfer(s)" -f $served) -ForegroundColor DarkGray
+        if ($served -gt 0) {
+            Write-Host ("  done - delivered to {0}; hunt is loaded there." -f $script:HuntLastClient) -ForegroundColor Green
+        } else {
+            Write-Host '  stopped - nothing was pulled.' -ForegroundColor DarkGray
+        }
     }
 }
 
@@ -207,10 +216,11 @@ function Invoke-RemoteStage {
     Write-Host ''
     Write-Host "  $command" -ForegroundColor White
     Write-Host ''
-    Write-Host '  waiting for the target to pull it ... ctrl-c to stop' -ForegroundColor DarkGray
+    $tail = if ($Keep) { 'ctrl-c to stop' } else { 'stops once the target pulls it' }
+    Write-Host "  waiting for the target to pull it ... $tail" -ForegroundColor DarkGray
     Write-Host ''
 
-    Start-HuntStage -Payload $payload -Port $usePort -RequestPath $reqPath
+    Start-HuntStage -Payload $payload -Port $usePort -RequestPath $reqPath -Keep:$Keep
 }
 
 

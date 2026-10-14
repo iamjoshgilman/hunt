@@ -29,6 +29,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import urllib.request
 from pathlib import Path
 
@@ -159,8 +160,20 @@ def target_command(url: str, size: int, use_curl: bool) -> str:
 
 def make_handler(payload: bytes, path: str, state: dict):
     class Handler(http.server.BaseHTTPRequestHandler):
-        protocol_version = "HTTP/1.1"
+        # HTTP/1.0 closes the connection after the response, so there is no
+        # keep-alive socket for the client to reset afterwards - which is what
+        # produced the ConnectionResetError traceback over an otherwise fine pull.
+        protocol_version = "HTTP/1.0"
         server_version = "hunt-stage"
+
+        def handle(self):
+            # A client that connects and resets (a probe, or a keep-alive close)
+            # raises while the request line is read, before do_GET runs. Swallow
+            # it so a fine transfer is not followed by a traceback.
+            try:
+                super().handle()
+            except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
+                self.close_connection = True
 
         def do_GET(self):  # noqa: N802
             if self.path.rstrip("/") not in (path, path.rstrip("/")):
@@ -177,8 +190,13 @@ def make_handler(payload: bytes, path: str, state: dict):
                              "33"), flush=True)
                 return
             state["served"] += 1
+            state["last"] = self.client_address[0]
             print(colour(f"  ok {self.client_address[0]} pulled "
                          f"{len(payload):,} bytes", "32"), flush=True)
+            # One good pull is the whole job; stop unless asked to stay up for
+            # more targets. shutdown() must be called off the serving thread.
+            if not state.get("keep"):
+                threading.Thread(target=state["server"].shutdown, daemon=True).start()
 
         def log_message(self, *_args):
             """Silence the default per-request noise; do_GET reports instead."""
@@ -197,8 +215,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="port to listen on (default 8000)")
     parser.add_argument("--file", help="serve a local hunt.ps1 instead of fetching it")
     parser.add_argument("--path", help="where to save the local copy (default: a temp file)")
+    parser.add_argument("--keep", action="store_true",
+                        help="keep serving after the first pull (for more targets)")
     parser.add_argument("--once", action="store_true",
-                        help="stop after the target pulls it")
+                        help=argparse.SUPPRESS)  # now the default; kept for compat
     parser.add_argument("--curl", action="store_true",
                         help="emit a curl.exe command instead of Net.WebClient")
     args = parser.parse_args(argv)
@@ -251,23 +271,26 @@ def main(argv: list[str] | None = None) -> int:
     print()
     print(colour(f"  {command}", "1;37"))
     print()
-    print(colour("  waiting for the target to pull it ... ctrl-c to stop", "2"))
+    tail = "ctrl-c to stop" if args.keep else "stops once the target pulls it"
+    print(colour(f"  waiting for the target to pull it ... {tail}", "2"))
     print()
 
-    state = {"served": 0}
+    state = {"served": 0, "last": None, "keep": args.keep}
     httpd = http.server.ThreadingHTTPServer(("", port),
                                             make_handler(payload, path, state))
+    state["server"] = httpd
     try:
-        if args.once:
-            while not state["served"]:
-                httpd.handle_request()
-        else:
-            httpd.serve_forever()
+        httpd.serve_forever()
     except KeyboardInterrupt:
-        print()
-        print(colour(f"  stopped after {state['served']} transfer(s)", "2"))
+        pass
     finally:
         httpd.server_close()
+
+    print()
+    if state["served"]:
+        print(colour(f"  done - delivered to {state['last']}; hunt is loaded there.", "1;32"))
+    else:
+        print(colour("  stopped - nothing was pulled.", "2"))
     return 0
 
 

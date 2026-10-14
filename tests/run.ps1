@@ -179,11 +179,45 @@ hunt -Path (Join-Path ([IO.Path]::GetTempPath()) 'does-not-exist.evtx') x -Warni
 Check 'file: missing warns'  ($w.Count -ge 1) ''
 Remove-Item $fake -Force -ErrorAction SilentlyContinue
 
+Write-Host "`n== -Path accepts a directory (expands to .evtx) =="
+$dir = Join-Path ([IO.Path]::GetTempPath()) ("hunt-dir-" + [guid]::NewGuid().ToString('N').Substring(0,8))
+New-Item -ItemType Directory -Path $dir -Force | Out-Null
+$da = Join-Path $dir 'a.evtx'; Set-Content -Path $da -Value 'x' -Force
+$db = Join-Path $dir 'b.evtx'; Set-Content -Path $db -Value 'x' -Force
+New-MockEvent -Log 'Microsoft-Windows-Sysmon/Operational' -Id 7 -Time (Get-Date).AddDays(-1) -MockPath $da -Data ([ordered]@{
+    Image='C:\A.exe'; ImageLoaded='C:\ProgramData\evil.dll'; Signed='false'; SignatureStatus='Unavailable' }) | Out-Null
+New-MockEvent -Log 'Microsoft-Windows-Sysmon/Operational' -Id 7 -Time (Get-Date).AddDays(-2) -MockPath $db -Data ([ordered]@{
+    Image='C:\B.exe'; ImageLoaded='C:\ProgramData\evil2.dll'; Signed='false'; SignatureStatus='Unavailable' }) | Out-Null
+Check 'dir expands to both evtx' (@(hunt -Path $dir -Id 7).Count -eq 2) "got $(@(hunt -Path $dir -Id 7).Count)"
+Check 'dir works for a play too'  (@(hunt play hijack -Path $dir).Count -eq 2) "got $(@(hunt play hijack -Path $dir).Count)"
+Check 'dir keyword filter'        (@(hunt -Path $dir evil2).Count -eq 1) "got $(@(hunt -Path $dir evil2).Count)"
+$ed = Join-Path ([IO.Path]::GetTempPath()) ("hunt-empty-" + [guid]::NewGuid().ToString('N').Substring(0,8))
+New-Item -ItemType Directory -Path $ed -Force | Out-Null
+$w2 = @(); hunt -Path $ed x -WarningVariable w2 -WarningAction SilentlyContinue | Out-Null
+Check 'empty dir warns, no throw' ($w2.Count -ge 1) ''
+Remove-Item $dir, $ed -Recurse -Force -ErrorAction SilentlyContinue
+
 Write-Host "`n== plays =="
 $h = hunt play creds
 Check 'play creds'    (@($h).Count -eq 1 -and $h.SourceImage -match 'mimikatz') "got $(@($h).Count)"
 $h = hunt play dumps
-Check 'play dumps'    (@($h).Count -ge 3) "got $(@($h).Count)"
+Check 'play dumps finds LSASS access + dump file' (@($h).Count -eq 2) "got $(@($h).Count)"
+Check 'play dumps excludes benign svchost' (@($h | ? { $_.SourceImage -match 'svchost' }).Count -eq 0) 'benign svchost->lsass leaked in'
+Check 'play dumps omits RawAccessRead noise' (@($h | ? { $_.Id -eq 9 }).Count -eq 0) ''
+
+# the mmc.exe / Event-Viewer-export red herring: a .evtx is not a dump artifact.
+# Isolated in a file so it does not touch the live-query fixtures.
+$ddir = Join-Path ([IO.Path]::GetTempPath()) ("hunt-dump-" + [guid]::NewGuid().ToString('N').Substring(0,8))
+New-Item -ItemType Directory -Path $ddir -Force | Out-Null
+$df = Join-Path $ddir 'LsassDump.evtx'; Set-Content -Path $df -Value 'x' -Force
+New-MockEvent -Log 'Microsoft-Windows-Sysmon/Operational' -Id 10 -Time (Get-Date).AddDays(-1) -MockPath $df -Data ([ordered]@{
+    SourceImage='C:\Windows\System32\rundll32.exe'; TargetImage='C:\Windows\System32\lsass.exe'; GrantedAccess='0x1410' }) | Out-Null
+New-MockEvent -Log 'Microsoft-Windows-Sysmon/Operational' -Id 11 -Time (Get-Date).AddDays(-1) -MockPath $df -Data ([ordered]@{
+    Image='C:\Windows\System32\mmc.exe'; TargetFilename='C:\Users\waldo\Desktop\LsassDump.evtx' }) | Out-Null
+$dh = @(hunt play dumps -Path $df)
+Check 'dumps: real access surfaces' ($dh | ? { $_.SourceImage -match 'rundll32' }) ''
+Check 'dumps: .evtx export is NOT flagged' (@($dh | ? { $_.Image -match 'mmc' }).Count -eq 0) 'Event Viewer export flagged as a dump'
+Remove-Item $ddir -Recurse -Force -ErrorAction SilentlyContinue
 $h = hunt play persist
 Check 'play persist'  (@($h).Count -ge 2) "got $(@($h).Count)"
 $h = hunt play spray

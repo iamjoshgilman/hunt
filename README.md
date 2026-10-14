@@ -123,7 +123,8 @@ It fetches hunt.ps1, picks your VPN address, serves it, copies that command to
 your clipboard, and tells you when the target pulls it. Paste the command into
 the target's shell — RDP, a reverse shell, Evil-WinRM, wherever you are — and
 `hunt` is loaded. The target reaches back to you, so nothing on it needs
-internet.
+internet. One good pull is the job, so it prints `done` and stops on its own;
+pass `--keep` / `-Keep` to stay up for more targets.
 
 The command it prints is doing three things worth knowing about:
 
@@ -140,10 +141,9 @@ The command it prints is doing three things worth knowing about:
   else, rather than exposing a whole directory to the target.
 
 Flags, same idea on both launchers: `--ip` / `-Ip` when it guesses the wrong
-interface, `--port` / `-Port`, `--once` / (ctrl-c) to stop after the first
-pull, `--file` / `-Source` to stage a local copy when your own box is offline
-too, and `--curl` / `-Curl` for a `curl.exe` target command instead of
-`Net.WebClient`.
+interface, `--port` / `-Port`, `--keep` / `-Keep` to serve more than one target,
+`--file` / `-Source` to stage a local copy when your own box is offline too, and
+`--curl` / `-Curl` for a `curl.exe` target command instead of `Net.WebClient`.
 
 If a box *does* have egress and `irm` still fails, Windows PowerShell 5.1
 negotiates TLS 1.0 by default and GitHub refuses it:
@@ -207,7 +207,7 @@ literal text, so `hunt sysmon C:\Users\bob` does not blow up on `\U`.
 | `-Full` | include the rendered event message |
 | `-Raw` | emit objects for the pipeline instead of a table |
 | `-On host` | query another machine |
-| `-Path f.evtx` | read saved exports instead of live channels (accepts several) |
+| `-Path f.evtx` | read saved exports — a file, a wildcard, or a folder (expands to its .evtx) |
 | `-After` / `-Before` | absolute datetime bounds |
 
 Tab completion covers source names, play names, event IDs for the chosen
@@ -280,6 +280,7 @@ hunt -Path triage.evtx mimikatz
 hunt -Path triage.evtx -Id 4625 -Count TargetUserName
 hunt play persist -Path triage.evtx
 hunt -Path *.evtx lsass            # several files at once
+hunt play hijack -Path C:\Logs\DLLHijack    # a folder - every .evtx inside it
 ```
 
 Records keep their original channel, so event IDs still resolve to names and
