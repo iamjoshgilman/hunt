@@ -3,8 +3,14 @@
 **Threat hunting for Windows event logs, from the command line.**
 
 [![tests](https://github.com/iamjoshgilman/hunt/actions/workflows/test.yml/badge.svg)](https://github.com/iamjoshgilman/hunt/actions/workflows/test.yml)
-[![PowerShell 5.1+](https://img.shields.io/badge/PowerShell-5.1%2B-5391FE?logo=powershell&logoColor=white)](https://learn.microsoft.com/en-us/powershell/)
+[![Windows PowerShell 5.1+](https://img.shields.io/badge/Windows-PowerShell%205.1%2B-5391FE?logo=powershell&logoColor=white)](https://learn.microsoft.com/en-us/powershell/)
 [![license: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+
+> **Windows only.** hunt reads logs through the Windows event-log API
+> (`EventLogReader`), which exists only on Windows. It runs under Windows
+> PowerShell 5.1 or PowerShell 7 *on Windows* - not on Linux/macOS pwsh, even to
+> read a saved `.evtx` (you'll get *"EventLog access is not supported on this
+> platform"*). On Linux, reach for Chainsaw or Hayabusa instead.
 
 Search any channel by keyword, event ID, field or time window. Aggregate what
 you find. Or run one of 44 prebuilt hunts for the behaviour you are chasing.
