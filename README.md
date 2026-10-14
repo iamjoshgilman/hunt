@@ -225,6 +225,11 @@ Time      Id Event                                 Detail
 14:22:05   1 Process creation                      LAB\jdoe | C:\Tools\mimikatz.exe | mimikatz.exe "privilege::debug" ...
 ```
 
+The `Time` column always keeps seconds, and grows only as far back as it needs
+to: `HH:mm:ss` for today, `MM-dd HH:mm:ss` earlier this year, and
+`yyyy-MM-dd HH:mm:ss` for an older `.evtx`, so a years-old export still reads
+exactly in the default table.
+
 Every event-data field is also promoted to a real property, so the pipeline
 still works:
 

@@ -604,10 +604,16 @@ function New-HuntRecord {
     }
     if (-not $name) { $name = 'Event ' + $id }
 
+    # Always keep seconds - they are what DFIR work and lab questions turn on.
+    # Add the date only when the event is not from today, and the year only when
+    # it is not from this year, so live hunting stays compact while a years-old
+    # .evtx still reads unambiguously in the default table.
     $tc = $Event.TimeCreated
-    if ($tc -and $tc.Date -eq (Get-Date).Date) { $ts = $tc.ToString('HH:mm:ss') }
-    elseif ($tc) { $ts = $tc.ToString('MM-dd HH:mm') }
-    else { $ts = '' }
+    $now = Get-Date
+    if (-not $tc)                      { $ts = '' }
+    elseif ($tc.Date -eq $now.Date)    { $ts = $tc.ToString('HH:mm:ss') }
+    elseif ($tc.Year -eq $now.Year)    { $ts = $tc.ToString('MM-dd HH:mm:ss') }
+    else                               { $ts = $tc.ToString('yyyy-MM-dd HH:mm:ss') }
 
     $h = [ordered]@{
         Time        = $ts

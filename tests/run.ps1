@@ -77,6 +77,15 @@ Check 'detail built'  ($r.Detail -match 'lsass') "got: $($r.Detail)"
 Check 'flattened'     ($r.TargetImage -match 'lsass') ''
 Check 'lazy message'  ($r.Message -match 'Rendered message') ''
 
+Write-Host "`n== time column keeps seconds =="
+$mk = { param($dt) $e = New-MockEvent -Log 'System' -Id 6005 -Time $dt -Data ([ordered]@{}); New-HuntRecord -Event $e -Log 'System' }
+$today = & $mk (Get-Date)
+Check 'today HH:mm:ss'   ($today.Time -match '^\d{2}:\d{2}:\d{2}$') "got: $($today.Time)"
+$thisyr = & $mk ((Get-Date).AddDays(-5))
+Check 'this-year has secs' ($thisyr.Time -match '^\d{2}-\d{2} \d{2}:\d{2}:\d{2}$') "got: $($thisyr.Time)"
+$old = & $mk ([datetime]'2019-03-17T19:30:30')
+Check 'old year full'    ($old.Time -eq '2019-03-17 19:30:30') "got: $($old.Time)"
+
 Write-Host "`n== search =="
 $h = hunt sysmon mimikatz
 Check 'keyword hits'  (@($h).Count -eq 2) "got $(@($h).Count)"
