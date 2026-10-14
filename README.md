@@ -14,6 +14,7 @@ hunt sysmon mimikatz                            # search event data across a cha
 hunt sysmon -Id 3 -Field DestinationPort=445    # filter on any event-data field
 hunt security -Id 4625 -Count TargetUserName    # aggregate: who is being sprayed
 hunt play persist -Last 24h                     # a prebuilt hunt, time-bounded
+hunt -Path triage.evtx mimikatz                 # a saved export, not a live host
 hunt where ransomware                           # when you know what, not where
 hunt ids 4625                                   # what is this event, and which log
 ```
@@ -124,7 +125,11 @@ literal text, so `hunt sysmon C:\Users\bob` does not blow up on `\U`.
 | `-Full` | include the rendered event message |
 | `-Raw` | emit objects for the pipeline instead of a table |
 | `-On host` | query another machine |
+| `-Path f.evtx` | read saved exports instead of live channels (accepts several) |
 | `-After` / `-Before` | absolute datetime bounds |
+
+Tab completion covers source names, play names, event IDs for the chosen
+source, and event-data field names for `-Show`, `-Count` and `-Field`.
 
 ## Output
 
@@ -175,6 +180,26 @@ Plays take the same options as a normal query:
 hunt play creds -Last 24h
 hunt play spray -Last 7d          # already counts by account
 hunt play procs mimikatz          # a play, narrowed by keyword
+```
+
+## Saved exports
+
+Everything works the same against a `.evtx` file, which is how most DFIR
+challenges hand you a log:
+
+```powershell
+hunt -Path triage.evtx mimikatz
+hunt -Path triage.evtx -Id 4625 -Count TargetUserName
+hunt play persist -Path triage.evtx
+hunt -Path *.evtx lsass            # several files at once
+```
+
+Records keep their original channel, so event IDs still resolve to names and
+the per-event detail fields still apply — a Sysmon 10 out of a file reads the
+same as one off a live host. Grab an export with:
+
+```powershell
+wevtutil epl Microsoft-Windows-Sysmon/Operational C:\export.evtx
 ```
 
 ## Sources

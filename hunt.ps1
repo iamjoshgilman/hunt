@@ -556,7 +556,11 @@ function Format-HuntValue {
 
 function New-HuntRecord {
     [CmdletBinding()] param($Event, [string]$Log, [string]$Xml)
-    $short = Get-HuntShortName $Log
+    # A record read from a .evtx still carries its original channel, so map on
+    # that rather than on the file path we happened to open.
+    $chan = $Log
+    try { if ($Event.LogName) { $chan = [string]$Event.LogName } } catch { }
+    $short = Get-HuntShortName $chan
     $id    = [int]$Event.Id
     $data  = ConvertFrom-HuntEventXml -Event $Event -Xml $Xml
     $key   = $short + ':' + $id
@@ -603,7 +607,7 @@ function New-HuntRecord {
         Event       = $name
         Detail      = ($parts -join ' | ')
         TimeCreated = $tc
-        Log         = $Log
+        Log         = $chan
         Source      = $short
         Computer    = $Event.MachineName
         Provider    = $Event.ProviderName
@@ -695,7 +699,8 @@ function Read-HuntRawEvents {
         [Nullable[datetime]]$Before,
         [switch]$Oldest,
         [string]$Computer,
-        $Credential
+        $Credential,
+        [switch]$IsFile      # $Log is a path to a saved .evtx, not a channel
     )
     $xpath = New-HuntXPath -Id $Id -After $After -Before $Before
     $session = $null
@@ -708,8 +713,14 @@ function Read-HuntRawEvents {
             $session = New-Object System.Diagnostics.Eventing.Reader.EventLogSession($Computer)
         }
     }
-    $query = New-Object System.Diagnostics.Eventing.Reader.EventLogQuery(
-        $Log, [System.Diagnostics.Eventing.Reader.PathType]::LogName, $xpath)
+    $pathType = [System.Diagnostics.Eventing.Reader.PathType]::LogName
+    if ($IsFile) {
+        $pathType = [System.Diagnostics.Eventing.Reader.PathType]::FilePath
+        if (-not (Test-Path -LiteralPath $Log)) {
+            throw (New-Object System.IO.FileNotFoundException ("No such event log file: $Log"), $Log)
+        }
+    }
+    $query = New-Object System.Diagnostics.Eventing.Reader.EventLogQuery($Log, $pathType, $xpath)
     if ($session) { $query.Session = $session }
     $query.ReverseDirection = (-not $Oldest)     # newest first by default
     # Deliberately NOT TolerateQueryErrors: that swallows the missing-channel
@@ -744,6 +755,7 @@ function Search-HuntEvents {
     [CmdletBinding()]
     param(
         [string[]]$Logs,
+        [string[]]$Path,
         [int[]]$Id,
         $Query,
         [string[]]$Field,
@@ -790,15 +802,35 @@ function Search-HuntEvents {
         $cfRx = New-Object Text.RegularExpressions.Regex ($pat, ([Text.RegularExpressions.RegexOptions]'Singleline, IgnoreCase'))
     }
 
+    $targets = $Logs
+    $isFile  = $false
+    if ($Path) { $targets = $Path; $isFile = $true; $Computers = @('.') }
+
     foreach ($comp in $Computers) {
-        foreach ($log in $Logs) {
-            if ($out.Count -ge $Max) { break }
-            $remaining = $Max - $out.Count
+        foreach ($log in $targets) {
+            # Each source gets its own -Max budget. Sharing one running budget
+            # let the first channel consume it entirely, so 'hunt all x -Max 40'
+            # could return 40 Sysmon hits and never query Security at all.
+            $remaining = $Max
+
+            # Shared counter: assignment inside ForEach-Object would write to a
+            # copy, so mutate a property on an object both scopes can see.
+            $tick = [pscustomobject]@{ n = 0 }
+            $label = $log
+            if ($label.Length -gt 48) { $label = '...' + $label.Substring($label.Length - 45) }
 
             try {
                 $hits = Read-HuntRawEvents -Log $log -Id $Id -After $After -Before $Before `
-                            -Oldest:$Oldest -Computer $comp -Credential $Credential | ForEach-Object {
+                            -Oldest:$Oldest -Computer $comp -Credential $Credential -IsFile:$isFile |
+                        ForEach-Object {
                     $e = $_
+                    $tick.n++
+                    # A full-channel keyword scan reads tens of thousands of
+                    # records; without this it looks like a hang.
+                    if (($tick.n % 2500) -eq 0) {
+                        Write-Progress -Id 42 -Activity "hunt: $label" `
+                            -Status "$($tick.n) events scanned"
+                    }
                     # One ToXml per event is the whole per-event cost; everything
                     # filters against that string before any XML is parsed.
                     try { $xmlText = $e.ToXml() } catch { $xmlText = '' }
@@ -835,6 +867,7 @@ function Search-HuntEvents {
                 $tn  = $ex.GetType().Name
                 $msg = [string]$ex.Message
                 if     ($tn -eq 'EventLogNotFoundException') { [void]$missing.Add($log) }
+                elseif ($tn -eq 'FileNotFoundException') { Write-Warning $msg }
                 elseif ($tn -eq 'UnauthorizedAccessException') { $denied = $true }
                 elseif ($msg -match 'unauthorized|Access is denied') { $denied = $true }
                 elseif ($msg -match 'not an event log|could not be found|does not exist|no event log') { [void]$missing.Add($log) }
@@ -854,6 +887,23 @@ function Search-HuntEvents {
             "'Remote Event Log Management' firewall rules enabled on the target: " +
             "netsh advfirewall firewall set rule group=`"Remote Event Log Management`" new enable=yes" -f ($Computers -join ', '))
     }
+    Write-Progress -Id 42 -Activity 'hunt' -Completed
+
+    # Results arrive grouped by channel; a hunter reading 'hunt all' expects a
+    # timeline. Merge them. The count path emits bare values with no timestamp,
+    # and a single source is already ordered by the reader, so skip both.
+    if (-not $CountField -and $out.Count -gt 1 -and ((@($targets).Count * $Computers.Count) -gt 1)) {
+        if ($Oldest) { $sorted = @($out | Sort-Object TimeCreated) }
+        else         { $sorted = @($out | Sort-Object TimeCreated -Descending) }
+        $out = New-Object Collections.ArrayList
+        foreach ($x in $sorted) { [void]$out.Add($x) }
+    }
+    if ($out.Count -gt $Max) {
+        $trimmed = New-Object Collections.ArrayList
+        for ($i = 0; $i -lt $Max; $i++) { [void]$trimmed.Add($out[$i]) }
+        $out = $trimmed
+    }
+
     if ($touched -eq 0 -and $missing.Count -gt 0) {
         foreach ($m in ($missing | Select-Object -Unique)) {
             if ($m -like '*Sysmon*') {
@@ -917,12 +967,30 @@ function Invoke-Hunt {
         [Alias('On')]
         [string[]]$ComputerName = @('.'),
 
-        [pscredential]$Credential
+        [pscredential]$Credential,
+
+        # One or more saved .evtx files to read instead of a live channel.
+        [Alias('File','Evtx')]
+        [string[]]$Path
     )
 
     # ---- subcommands ----
     $sub = ''
     if ($Source) { $sub = $Source.ToLower().TrimStart([char[]]@('-','/')) }
+
+    if (-not $Source -and -not $Path) { Show-HuntHelp; return }
+
+    # With -Path there is no channel to name, so everything positional is a
+    # keyword: hunt -Path triage.evtx mimikatz. A play is the exception - it
+    # runs against a file just as happily, so let it dispatch below.
+    if ($Path -and $sub -notin @('play','plays','p','run')) {
+        $terms = @()
+        if ($Source) { $terms += $Source }
+        if ($Query)  { $terms += $Query }
+        return Invoke-HuntFile -Path $Path -Terms $terms -Id $Id -Last $Last -After $After `
+            -Before $Before -Max $Max -Field $Field -Count $Count -Show $Show `
+            -Full:$Full -Raw:$Raw -Oldest:$Oldest
+    }
 
     if (-not $Source -or $sub -in @('help','h','?','tldr','usage','--help')) {
         Show-HuntHelp; return
@@ -981,6 +1049,38 @@ function Invoke-Hunt {
     return Format-HuntResult -Results $results -Count $Count -Show $Show -Full:$Full -Raw:$Raw -Max $Max
 }
 
+function Invoke-HuntFile {
+    [CmdletBinding()]
+    param(
+        [string[]]$Path, [string[]]$Terms, [int[]]$Id, [string]$Last,
+        [Nullable[datetime]]$After, [Nullable[datetime]]$Before, [int]$Max = 40,
+        [string[]]$Field, [string]$Count, [string[]]$Show,
+        [switch]$Full, [switch]$Raw, [switch]$Oldest
+    )
+    $resolved = @()
+    foreach ($p in $Path) {
+        $found = @(Resolve-Path -Path $p -ErrorAction SilentlyContinue)
+        if ($found.Count -eq 0) { Write-Warning "No such file: $p"; continue }
+        foreach ($f in $found) { $resolved += $f.Path }
+    }
+    if ($resolved.Count -eq 0) { return }
+
+    $afterTime = $After
+    if ($Last) {
+        $span = ConvertTo-HuntTimeSpan $Last
+        if ($span) { $afterTime = (Get-Date).Subtract($span) }
+    }
+    $effMax = $Max
+    if ($Count) { $effMax = 100000 }
+    $countFast = ''
+    if ($Count -and -not $Field) { $countFast = $Count }
+
+    $results = Search-HuntEvents -Path $resolved -Id $Id -Query (New-HuntQuery -Terms $Terms) `
+        -Field $Field -CountField $countFast -After $afterTime -Before $Before `
+        -Max $effMax -Oldest:$Oldest
+    return Format-HuntResult -Results $results -Count $Count -Show $Show -Full:$Full -Raw:$Raw -Max $Max
+}
+
 function Invoke-HuntPlay {
     [CmdletBinding()]
     param([string]$Name, [string[]]$Extra, [hashtable]$Options)
@@ -1000,6 +1100,7 @@ function Invoke-HuntPlay {
     $comps  = @('.'); if ($o.ContainsKey('ComputerName')) { $comps = $o['ComputerName'] }
     $cred   = $null; if ($o.ContainsKey('Credential')) { $cred = $o['Credential'] }
     $userField = @(); if ($o.ContainsKey('Field')) { $userField = @($o['Field']) }
+    $path = $null; if ($o.ContainsKey('Path')) { $path = @($o['Path']) }
     $countBy = ''; if ($o.ContainsKey('Count')) { $countBy = [string]$o['Count'] }
     $resolvedCount = $countBy   # an explicit -Count beats the play's own default
     $show = $null; if ($o.ContainsKey('Show')) { $show = $o['Show'] }
@@ -1024,7 +1125,7 @@ function Invoke-HuntPlay {
         $countFast = ''
         if ($resolvedCount -and -not $fields) { $countFast = $resolvedCount }
 
-        $r = Search-HuntEvents -Logs $logs -Id $step.Id -Query $parsed -Field $fields `
+        $r = Search-HuntEvents -Logs $logs -Path $path -Id $step.Id -Query $parsed -Field $fields `
             -MatchRegex $stepMatch -NotRegex $stepNot -CountField $countFast `
             -After $afterTime -Before $before -Max $effMax `
             -Computers $comps -Credential $cred -WarningAction SilentlyContinue
@@ -1141,6 +1242,7 @@ function Show-HuntHelp {
     Write-HuntRow 'by id'     'hunt security -Id 4625 -Last 1h'          14 DarkGray
     Write-HuntRow 'by field'  'hunt sysmon -Id 3 -Field DestinationPort=445' 14 DarkGray
     Write-HuntRow 'a play'    'hunt play creds -Last 24h'                14 DarkGray
+    Write-HuntRow 'a file'    'hunt -Path triage.evtx mimikatz'          14 DarkGray
     Write-HuntRow 'counting'  'hunt security -Id 4625 -Count TargetUserName' 14 DarkGray
     Write-HuntRow 'columns'   'hunt sysmon -Id 1 -Show Image,CommandLine' 14 DarkGray
     Write-Host ''
@@ -1154,6 +1256,9 @@ function Show-HuntHelp {
     Write-HuntRow '-Full'        'include the rendered event message'                14 DarkGray
     Write-HuntRow '-Raw'         'emit objects for the pipeline instead of a table'  14 DarkGray
     Write-HuntRow '-On host1'    'run against another machine (needs rights)'        14 DarkGray
+    Write-HuntRow '-Path x.evtx' 'read a saved export instead of a live channel'     14 DarkGray
+    Write-Host ''
+    Write-Host '  Tab completes sources, play names, event ids and field names.' -ForegroundColor DarkGray
     Write-Host ''
     Write-Host '  Keywords match event DATA (command lines, paths, users, IPs), not the' -ForegroundColor DarkGray
     Write-Host '  rendered description. Regex works; if it will not compile it is treated' -ForegroundColor DarkGray
@@ -1367,6 +1472,67 @@ function Find-HuntTarget {
     Write-Host ''
     Write-Host ("  or search the raw data: hunt all {0}" -f $t) -ForegroundColor DarkGray
     Write-Host ''
+}
+
+# ------------------------------------------------------------- completion --
+# The play catalogue is only useful if you can find a play without reading the
+# list, so complete names, sources and ids at the prompt.
+
+$script:HuntSubcommands = @('play', 'plays', 'ids', 'sources', 'where', 'help', 'version')
+
+function script:New-HuntCompletion {
+    param([string]$Text, [string]$Tip)
+    if (-not $Tip) { $Tip = $Text }
+    $quoted = $Text
+    if ($Text -match '\s') { $quoted = "'$Text'" }
+    New-Object System.Management.Automation.CompletionResult $quoted, $Text, 'ParameterValue', $Tip
+}
+
+Register-ArgumentCompleter -CommandName Invoke-Hunt, hunt -ParameterName Source -ScriptBlock {
+    param($command, $parameter, $wordToComplete, $ast, $fakeBound)
+    $items = [ordered]@{}
+    foreach ($k in $script:HuntSubcommands) { $items[$k] = 'command' }
+    foreach ($k in $script:HuntSources.Keys) { $items[$k] = $script:HuntSources[$k].Desc }
+    foreach ($k in ($script:HuntAliases.Keys | Sort-Object)) { $items[$k] = "alias for $($script:HuntAliases[$k])" }
+    foreach ($k in $items.Keys) {
+        if ($k -like "$wordToComplete*") { script:New-HuntCompletion $k $items[$k] }
+    }
+}
+
+Register-ArgumentCompleter -CommandName Invoke-Hunt, hunt -ParameterName Query -ScriptBlock {
+    param($command, $parameter, $wordToComplete, $ast, $fakeBound)
+    $src = ''
+    if ($fakeBound -and $fakeBound.ContainsKey('Source')) { $src = ([string]$fakeBound['Source']).ToLower() }
+    if ($src -in @('play', 'plays', 'p', 'run')) {
+        foreach ($k in $script:HuntPlays.Keys) {
+            if ($k -like "$wordToComplete*") { script:New-HuntCompletion $k $script:HuntPlays[$k].Desc }
+        }
+    }
+    elseif ($src -in @('ids', 'id', 'events')) {
+        foreach ($k in ($script:HuntIds.Keys | Sort-Object)) {
+            if ($k -like "$wordToComplete*") { script:New-HuntCompletion $k "$($script:HuntIds[$k].Count) event ids" }
+        }
+    }
+}
+
+Register-ArgumentCompleter -CommandName Invoke-Hunt, hunt -ParameterName Id -ScriptBlock {
+    param($command, $parameter, $wordToComplete, $ast, $fakeBound)
+    $src = ''
+    if ($fakeBound -and $fakeBound.ContainsKey('Source')) { $src = ([string]$fakeBound['Source']).ToLower() }
+    if ($script:HuntAliases.ContainsKey($src)) { $src = $script:HuntAliases[$src] }
+    if (-not $script:HuntIds.ContainsKey($src)) { return }
+    foreach ($id in ($script:HuntIds[$src].Keys | Sort-Object { [int]$_ })) {
+        if ("$id" -like "$wordToComplete*") { script:New-HuntCompletion "$id" $script:HuntIds[$src][$id] }
+    }
+}
+
+foreach ($fieldParam in @('Show', 'Count', 'Field')) {
+    Register-ArgumentCompleter -CommandName Invoke-Hunt, hunt -ParameterName $fieldParam -ScriptBlock {
+        param($command, $parameter, $wordToComplete, $ast, $fakeBound)
+        foreach ($f in $script:HuntDetailFallback) {
+            if ($f -like "$wordToComplete*" -and $f -notmatch '\s') { script:New-HuntCompletion $f 'event-data field' }
+        }
+    }
 }
 
 Set-Alias -Name hunt -Value Invoke-Hunt -Force

@@ -127,6 +127,46 @@ Check 'count no match on real id' (@(hunt security -Id 9999 -Count TargetUserNam
 Check 'play empty'    (@(hunt play dcsync).Count -eq 0) ''
 Check 'formatter null-safe' ($null -eq (Format-HuntResult -Results $null -Count 'X')) ''
 
+Write-Host "`n== tab completion =="
+function Complete([string]$line) {
+    $r = [System.Management.Automation.CommandCompletion]::CompleteInput($line, $line.Length, $null)
+    return @($r.CompletionMatches | ForEach-Object { $_.CompletionText })
+}
+Check 'completes sources'   ((Complete 'hunt sys') -contains 'sysmon') ''
+Check 'completes aliases'   ((Complete 'hunt se') -contains 'sec') ''
+Check 'completes commands'  ((Complete 'hunt wh') -contains 'where') ''
+Check 'completes play names' ((Complete 'hunt play cr') -contains 'creds') ''
+Check 'play completion is scoped' (-not ((Complete 'hunt sysmon cr') -contains 'creds')) 'play names offered outside a play'
+Check 'completes ids for source' ((Complete 'hunt security -Id 46') -contains '4625') ''
+Check 'ids scoped to source' (-not ((Complete 'hunt sysmon -Id 46') -contains '4625')) 'security ids offered for sysmon'
+Check 'completes field names' ((Complete 'hunt security -Count Targ') -contains 'TargetUserName') ''
+Check 'completes ids subject'  ((Complete 'hunt ids sec') -contains 'security') ''
+
+Write-Host "`n== saved .evtx files =="
+$fake = Join-Path ([IO.Path]::GetTempPath()) 'hunt-fixture.evtx'
+Set-Content -Path $fake -Value 'not really an evtx, the reader is mocked' -Force
+$now2 = Get-Date
+New-MockEvent -Log 'Microsoft-Windows-Sysmon/Operational' -Id 1 -Time $now2.AddMinutes(-10) -MockPath $fake -Data ([ordered]@{
+    User='LAB\exported'; Image='C:\Tools\rubeus.exe'; CommandLine='rubeus.exe kerberoast'; ParentImage='C:\Windows\System32\cmd.exe' }) | Out-Null
+New-MockEvent -Log 'Microsoft-Windows-Sysmon/Operational' -Id 10 -Time $now2.AddMinutes(-11) -MockPath $fake -Data ([ordered]@{
+    SourceImage='C:\Tools\rubeus.exe'; TargetImage='C:\Windows\system32\lsass.exe'; GrantedAccess='0x1410' }) | Out-Null
+
+Check 'file: keyword'        (@(hunt -Path $fake rubeus).Count -eq 2) "got $(@(hunt -Path $fake rubeus).Count)"
+Check 'file: by id'          (@(hunt -Path $fake -Id 1).Count -eq 1) ''
+Check 'file: AND'            (@(hunt -Path $fake rubeus kerberoast).Count -eq 1) ''
+Check 'file: NOT'            (@(hunt -Path $fake rubeus '!lsass').Count -eq 1) ''
+$r = @(hunt -Path $fake -Id 10)
+Check 'file: channel mapped' ($r[0].Event -match 'Process access') "got: $($r[0].Event)"
+Check 'file: Log is channel' ($r[0].Log -match 'Sysmon') "got: $($r[0].Log)"
+Check 'file: fields flattened' ($r[0].TargetImage -match 'lsass') ''
+Check 'file: count'          (@(hunt -Path $fake -Count Image).Count -ge 1) ''
+Check 'file: play works'     (@(hunt play creds -Path $fake).Count -eq 1) "got $(@(hunt play creds -Path $fake).Count)"
+Check 'file: live log untouched' (@(hunt sysmon rubeus).Count -eq 0) 'file fixtures leaked into the live channel'
+$w = @()
+hunt -Path (Join-Path ([IO.Path]::GetTempPath()) 'does-not-exist.evtx') x -WarningVariable w -WarningAction SilentlyContinue | Out-Null
+Check 'file: missing warns'  ($w.Count -ge 1) ''
+Remove-Item $fake -Force -ErrorAction SilentlyContinue
+
 Write-Host "`n== plays =="
 $h = hunt play creds
 Check 'play creds'    (@($h).Count -eq 1 -and $h.SourceImage -match 'mimikatz') "got $(@($h).Count)"

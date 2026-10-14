@@ -11,7 +11,8 @@ function New-MockEvent {
         [datetime]$Time,
         [System.Collections.Specialized.OrderedDictionary]$Data,
         [string]$Computer = 'WS01',
-        [string]$Provider = 'Mock'
+        [string]$Provider = 'Mock',
+        [string]$MockPath        # set to put this record in a simulated .evtx
     )
     $sb = New-Object Text.StringBuilder
     [void]$sb.Append('<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">')
@@ -31,7 +32,7 @@ function New-MockEvent {
     $e = [pscustomobject]@{
         Id = $Id; TimeCreated = $Time; MachineName = $Computer; ProviderName = $Provider
         LevelDisplayName = 'Information'; RecordId = [int64](Get-Random -Maximum 99999)
-        LogName = $Log; Properties = $props; TaskDisplayName = "Task $Id"
+        LogName = $Log; Properties = $props; TaskDisplayName = "Task $Id"; MockPath = $MockPath
         Message = "Rendered message for event $Id"
     }
     Add-Member -InputObject $e -MemberType ScriptMethod -Name ToXml -Value { $xml }.GetNewClosure()
@@ -49,12 +50,23 @@ function Read-HuntRawEvents {
         [Nullable[datetime]]$Before,
         [switch]$Oldest,
         [string]$Computer,
-        $Credential
+        $Credential,
+        [switch]$IsFile
     )
-    $set = @($script:MockEvents | Where-Object { $_.LogName -eq $Log })
-    if ($set.Count -eq 0) {
-        $ex = New-Object System.IO.FileNotFoundException "There is no event log on the localhost computer with the specified name: $Log"
-        throw $ex
+    if ($IsFile) {
+        # A record read from a file keeps its original channel, which is what
+        # the detail and event-name maps key on.
+        $set = @($script:MockEvents | Where-Object { $_.MockPath -and $_.MockPath -eq $Log })
+        if ($set.Count -eq 0) {
+            throw (New-Object System.IO.FileNotFoundException ("No such event log file: $Log"), $Log)
+        }
+    }
+    else {
+        $set = @($script:MockEvents | Where-Object { $_.LogName -eq $Log -and -not $_.MockPath })
+        if ($set.Count -eq 0) {
+            $ex = New-Object System.IO.FileNotFoundException "There is no event log on the localhost computer with the specified name: $Log"
+            throw $ex
+        }
     }
     if ($Id)     { $set = @($set | Where-Object { $Id -contains $_.Id }) }
     if ($After)  { $set = @($set | Where-Object { $_.TimeCreated -ge $After }) }

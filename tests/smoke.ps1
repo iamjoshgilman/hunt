@@ -103,6 +103,30 @@ if ($sysmonHere) {
     Check 'sysmon absent: points at 4688' (($w -join ' ') -match '4688') "got: $($w -join '; ')"
 }
 
+Write-Host "`n== saved .evtx round trip =="
+$evtx = Join-Path $env:TEMP 'hunt-smoke.evtx'
+Remove-Item $evtx -Force -ErrorAction SilentlyContinue
+& wevtutil.exe epl System "$evtx" /ow:true 2>&1 | Out-Null
+if (Test-Path $evtx) {
+    $f = @(hunt -Path $evtx -Max 5)
+    Check 'evtx: readable'        ($f.Count -gt 0) "got $($f.Count) records"
+    if ($f.Count -gt 0) {
+        Check 'evtx: channel mapped'  ($f[0].Log -match 'System') "got: $($f[0].Log)"
+        Check 'evtx: event described' (-not [string]::IsNullOrWhiteSpace($f[0].Event)) ''
+        Check 'evtx: data parsed'     ($null -ne $f[0].Data) ''
+    }
+    $byId = @(hunt -Path $evtx -Id 6005 -Max 5)
+    $wrong = @($byId | Where-Object { $_.Id -ne 6005 })
+    Check 'evtx: id filter honoured' ($wrong.Count -eq 0) "$($wrong.Count) off-id records"
+    Check 'evtx: no-match keyword'   (@(hunt -Path $evtx zzqqxxnomatch).Count -eq 0) ''
+    Remove-Item $evtx -Force -ErrorAction SilentlyContinue
+} else {
+    Write-Host '  SKIP  evtx round trip (wevtutil export produced no file)' -ForegroundColor DarkGray
+}
+$w = @()
+hunt -Path (Join-Path $env:TEMP 'definitely-not-here.evtx') x -WarningVariable w -WarningAction SilentlyContinue | Out-Null
+Check 'evtx: missing file warns' ($w.Count -ge 1) ''
+
 Write-Host "`n== a couple of plays end to end =="
 foreach ($p in @('boot', 'audit', 'svc', 'logons', 'newusers')) {
     $err = $null
