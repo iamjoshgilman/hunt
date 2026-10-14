@@ -11,7 +11,7 @@ jobs:
     name: logic (mocked, ubuntu)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Parse check
         shell: pwsh
@@ -37,7 +37,7 @@ jobs:
     name: real event logs (windows)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Windows PowerShell 5.1 first: it is what the target hosts actually run.
       - name: Mocked suites (Windows PowerShell 5.1)
