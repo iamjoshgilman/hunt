@@ -1,12 +1,18 @@
 #Requires -Version 5.1
 <#
-    hunt - fast, memorable threat hunting over Windows event logs.
+    hunt - threat hunting for Windows event logs, from the command line.
 
-        hunt sysmon mimikatz            # keyword across Sysmon event data
+    Search any channel by keyword, event id, field or time window; aggregate
+    by any event-data field; or run one of 42 prebuilt hunts.
+
+        hunt sysmon mimikatz            # search event data across a channel
         hunt security -Id 4625          # by event id
-        hunt play creds                 # prebuilt hunt
-        hunt ids sysmon                 # event id cheat sheet
-        hunt sources                    # what you can query
+        hunt sysmon -Id 3 -Field DestinationPort=445   # by event-data field
+        hunt security -Id 4625 -Count TargetUserName   # aggregate
+        hunt play creds                 # one of 42 prebuilt hunts
+        hunt where ransomware           # when you know what, not where
+        hunt ids 4625                   # what is this event, and which log
+        hunt sources                    # what you can query here
 
     Single file, no dependencies, PowerShell 5.1+. Dot-source it or install
     as a module; both expose the 'hunt' alias.
@@ -1116,7 +1122,7 @@ function Write-HuntRow {
 function Show-HuntHelp {
     Write-Host ''
     Write-Host "  hunt $script:HuntVersion" -ForegroundColor Green -NoNewline
-    Write-Host '  -  Windows event logs, two words at a time.'
+    Write-Host '  -  Threat hunting for Windows event logs.'
     Write-Host ''
     Write-Host '  GRAMMAR' -ForegroundColor Yellow
     Write-Host '    hunt <source> <keyword...> [options]'

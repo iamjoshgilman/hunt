@@ -1,25 +1,52 @@
 # hunt
 
-**Windows event logs, two words at a time.**
+**Threat hunting for Windows event logs, from the command line.**
 
 [![tests](https://github.com/iamjoshgilman/hunt/actions/workflows/test.yml/badge.svg)](https://github.com/iamjoshgilman/hunt/actions/workflows/test.yml)
 [![PowerShell 5.1+](https://img.shields.io/badge/PowerShell-5.1%2B-5391FE?logo=powershell&logoColor=white)](https://learn.microsoft.com/en-us/powershell/)
 [![license: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-```powershell
-hunt sysmon mimikatz
-```
-
-instead of
+Search any channel by keyword, event ID, field or time window. Aggregate what
+you find. Or run one of 42 prebuilt hunts for the behaviour you are chasing.
 
 ```powershell
-Get-WinEvent -LogName Microsoft-Windows-Sysmon/Operational |
-    Where-Object { $_.Id -eq 13 -and $_.Message -match 'mimikatz' } | Format-List Message
+hunt sysmon mimikatz                            # search event data across a channel
+hunt sysmon -Id 3 -Field DestinationPort=445    # filter on any event-data field
+hunt security -Id 4625 -Count TargetUserName    # aggregate: who is being sprayed
+hunt play persist -Last 24h                     # a prebuilt hunt, time-bounded
+hunt where ransomware                           # when you know what, not where
+hunt ids 4625                                   # what is this event, and which log
 ```
+
+Four things it does:
+
+| | |
+|---|---|
+| **search** | any channel, by keyword (AND/OR/NOT), event ID, field or time window |
+| **count** | aggregate by any event-data field, without writing a `Group-Object` |
+| **plays** | 42 named hunts — credential theft, persistence, lateral movement, defence evasion, discovery |
+| **lookup** | find the right log and event ID when you only know what you are after |
+
+Results come back as objects with every event-data field promoted to a
+property, so anything it does not do directly, the pipeline still can.
 
 Single file, no dependencies, PowerShell 5.1+. Built for CTFs, HTB labs and
 quick triage on a box you do not own — not as a replacement for a SIEM. If the
-question is complicated enough to need joins and a timechart, go use Splunk.
+question needs joins and a timechart, go use Splunk.
+
+<details>
+<summary>What it replaces</summary>
+
+```powershell
+# this
+hunt sysmon mimikatz
+
+# instead of this
+Get-WinEvent -LogName Microsoft-Windows-Sysmon/Operational |
+    Where-Object { $_.Id -eq 13 -and $_.Message -match 'mimikatz' } |
+    Format-List Message
+```
+</details>
 
 ## Install
 
