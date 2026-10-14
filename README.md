@@ -7,7 +7,7 @@
 [![license: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 Search any channel by keyword, event ID, field or time window. Aggregate what
-you find. Or run one of 42 prebuilt hunts for the behaviour you are chasing.
+you find. Or run one of 44 prebuilt hunts for the behaviour you are chasing.
 
 ```powershell
 hunt sysmon mimikatz                            # search event data across a channel
@@ -25,7 +25,7 @@ Four things it does:
 |---|---|
 | **search** | any channel, by keyword (AND/OR/NOT), event ID, field or time window |
 | **count** | aggregate by any event-data field, without writing a `Group-Object` |
-| **plays** | 42 named hunts — credential theft, persistence, lateral movement, defence evasion, discovery |
+| **plays** | 44 named hunts — credential theft, persistence, lateral movement, defence evasion, discovery |
 | **lookup** | find the right log and event ID when you only know what you are after |
 
 Results come back as objects with every event-data field promoted to a
@@ -160,7 +160,7 @@ why "Defender detected malware" is ID 1116 but is **not** in the Security log.
 
 ```powershell
 hunt where ransomware      # you know WHAT you want, not where it lives
-hunt plays                 # 42 prebuilt hunts, by name
+hunt plays                 # 44 prebuilt hunts, by name
 hunt ids 4625              # which log is this ID in, and what is it?
 ```
 
@@ -246,15 +246,16 @@ A play is a named hunt that already knows the IDs, channels and filters.
 | `persist` | `sched` | `svc` |
 | `spray` | `sprayip` | `logons` |
 | `lockouts` | `kerberoast` | `dcsync` |
-| `psexec` | `lateral` | `lolbas` |
-| `encoded` | `downloads` | `injection` |
+| `goldenish` | `psexec` | `lateral` |
+| `lolbas` | `encoded` | `downloads` |
+| `injection` | `hijack` | `dotnet` |
 | `scripts` | `shadow` | `tamper` |
 | `threats` | `newusers` | `admins` |
 | `wmi` | `pipes` | `rdp` |
 | `shares` | `clearlog` | `drivers` |
 | `ads` | `uac` | `recon` |
 | `boot` | `audit` | `blocked` |
-| `handles` | `sharechange` | `goldenish` |
+| `handles` | `sharechange` |  |
 
 Plays take the same options as a normal query:
 

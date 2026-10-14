@@ -90,6 +90,9 @@ $h = hunt sysmon -Id 3 -Field DestinationPort=445
 Check 'field filter'  (@($h).Count -eq 1) "got $(@($h).Count)"
 $h = hunt sysmon -Id 3 -Field 'DestinationPort!=445'
 Check 'field exclude' (@($h).Count -eq 0) "got $(@($h).Count)"
+# a $-anchored field filter must still match (the pre-filter used to drop it)
+$h = hunt sysmon -Id 1 -Field 'Image=mimikatz\.exe$'
+Check 'field filter anchored' (@($h).Count -eq 1) "got $(@($h).Count)"
 $h = hunt sysmon -Id 1 -Max 1
 Check 'max caps'      (@($h).Count -eq 1) "got $(@($h).Count)"
 $h = hunt security -Id 4625 -Count TargetUserName
@@ -182,6 +185,13 @@ $h = hunt play encoded
 Check 'play encoded'  (@($h).Count -ge 1) "got $(@($h).Count)"
 $h = hunt play boot
 Check 'play boot'     (@($h).Count -ge 1) "got $(@($h).Count)"
+$h = hunt play hijack
+Check 'play hijack finds unsigned' (@($h | ? { $_.ImageLoaded -match 'DismCore' }).Count -ge 1) "got $(@($h).Count)"
+Check 'play hijack skips signed sys32' (@($h | ? { $_.ImageLoaded -match 'shell32' }).Count -eq 0) 'flagged a signed System32 load'
+Check 'play hijack Image is the process' ((@($h)[0].Image) -match '\.exe$') "got: $((@($h)[0]).Image)"
+$h = hunt play dotnet
+Check 'play dotnet finds clrjit' (@($h | ? { $_.ImageLoaded -match 'clrjit' }).Count -eq 1) "got $(@($h).Count)"
+Check 'play dotnet Image=spoolsv' ((@($h)[0].Image) -match 'spoolsv') "got: $((@($h)[0]).Image)"
 $h = hunt play creds -Last 1h
 Check 'play honours -Last' (@($h).Count -eq 1) "got $(@($h).Count)"
 $h = hunt play procs mimikatz
@@ -196,6 +206,12 @@ $out = (hunt where ransomware 6>&1 | Out-String)
 Check 'where ransom'   ($out -match 'shadow') ''
 $out = (hunt where 'turn off defender' 6>&1 | Out-String)
 Check 'where tamper'   ($out -match 'tamper') ''
+$out = (hunt where 'dll hijack' 6>&1 | Out-String)
+Check 'where hijack'   ($out -match 'hunt play hijack') ''
+$out = (hunt where 'unmanaged powershell' 6>&1 | Out-String)
+Check 'where dotnet'   ($out -match 'hunt play dotnet') ''
+$out = (hunt where 'execute-assembly' 6>&1 | Out-String)
+Check 'where dotnet2'  ($out -match 'hunt play dotnet') 
 $out = (hunt where zzzznothing 6>&1 | Out-String)
 Check 'where miss'     ($out -match 'hunt sysmon zzzznothing') ''
 $out = (hunt ids 4625 6>&1 | Out-String)

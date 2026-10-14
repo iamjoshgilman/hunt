@@ -3,13 +3,13 @@
     hunt - threat hunting for Windows event logs, from the command line.
 
     Search any channel by keyword, event id, field or time window; aggregate
-    by any event-data field; or run one of 42 prebuilt hunts.
+    by any event-data field; or run one of 44 prebuilt hunts.
 
         hunt sysmon mimikatz            # search event data across a channel
         hunt security -Id 4625          # by event id
         hunt sysmon -Id 3 -Field DestinationPort=445   # by event-data field
         hunt security -Id 4625 -Count TargetUserName   # aggregate
-        hunt play creds                 # one of 42 prebuilt hunts
+        hunt play creds                 # one of 44 prebuilt hunts
         hunt where ransomware           # when you know what, not where
         hunt ids 4625                   # what is this event, and which log
         hunt sources                    # what you can query here
@@ -251,6 +251,14 @@ $script:HuntPlays = [ordered]@{
 
     injection = [pscustomobject]@{ Desc = 'Remote thread creation and process tampering'
         Steps = @( @{ S='sysmon'; Id=@(8) }, @{ S='sysmon'; Id=@(25) } ) }
+
+    hijack = [pscustomobject]@{ Desc = 'DLL hijack / sideload: unsigned image loads, or loads from drop dirs'
+        Steps = @(
+            @{ S='sysmon'; Id=@(7); Field=@('Signed=false'); Show=@('Image','ImageLoaded','SignatureStatus') }
+            @{ S='sysmon'; Id=@(7); Field=@('ImageLoaded=\\(ProgramData|Temp|Public|Downloads)\\'); Show=@('Image','ImageLoaded','SignatureStatus') } ) }
+
+    dotnet = [pscustomobject]@{ Desc = '.NET runtime loaded - unmanaged PowerShell, execute-assembly, CLR injection'
+        Steps = @( @{ S='sysmon'; Id=@(7); Field=@('ImageLoaded=\\(clr|clrjit|mscoree|mscorlib|coreclr|mscorwks)\.dll$'); Show=@('Image','ImageLoaded') } ) }
 
     scripts = [pscustomobject]@{ Desc = 'Script files written and script hosts launched'
         Steps = @(
@@ -792,7 +800,15 @@ function Search-HuntEvents {
             $i = $spec.IndexOfAny([char[]]@('=', ':'))
             if ($i -lt 1) { continue }
             if ($spec.Substring(0, $i).Trim().EndsWith('!')) { continue }
-            $fieldPre += (New-HuntRegex $spec.Substring($i + 1).Trim())
+            # The cheap gate runs against every field value joined together, so
+            # a field anchored with ^ or $ (e.g. ImageLoaded=clrjit\.dll$) would
+            # never match here even when the field itself does - the value is not
+            # at the start/end of the blob. Strip anchors for the gate only; the
+            # exact anchored match still happens in Test-HuntField per field.
+            $pat = $spec.Substring($i + 1).Trim()
+            if ($pat.StartsWith('^')) { $pat = $pat.Substring(1) }
+            if ($pat.EndsWith('$') -and -not $pat.EndsWith('\$')) { $pat = $pat.Substring(0, $pat.Length - 1) }
+            $fieldPre += (New-HuntRegex $pat)
         }
     }
 
@@ -1208,7 +1224,9 @@ $script:HuntIndex = @(
     @{ T = 'process|command line|what ran|execution|parent';          Run = 'hunt play procs';       Why = 'process creation with full command lines' }
     @{ T = 'file (write|created|dropped)|wrote|dropped file';          Run = 'hunt sysmon -Id 11';    Why = 'Sysmon file-create events' }
     @{ T = 'registry|regkey|reg add';                                  Run = 'hunt sysmon -Id 12,13'; Why = 'registry key and value changes' }
-    @{ T = 'dll|module|image load|sideload';                           Run = 'hunt sysmon -Id 7';     Why = 'image loads, with signature status' }
+    @{ T = 'dll hijack|hijack|side.?load|unsigned dll|search order|proxy dll|phantom dll'; Run = 'hunt play hijack'; Why = 'unsigned or drop-dir image loads (Sysmon 7)' }
+    @{ T = 'unmanaged powershell|execute.?assembly|\.net (assembly|inject)|\bclr\b|clrjit|managed code|byol'; Run = 'hunt play dotnet'; Why = 'processes loading the .NET runtime (clr/clrjit)' }
+    @{ T = 'dll|module|image load';                                    Run = 'hunt sysmon -Id 7';     Why = 'image loads, with signature status' }
     @{ T = 'driver|byovd|kernel';                                      Run = 'hunt play drivers';     Why = 'driver loads with signature status' }
     @{ T = 'pipe|named pipe';                                          Run = 'hunt play pipes';       Why = 'named pipes created and connected' }
     @{ T = 'dns|domain lookup|resolve|query';                          Run = 'hunt play dns';         Why = 'DNS queries attributed to a process' }
@@ -1230,7 +1248,7 @@ function Show-HuntHelp {
     Write-Host ''
     Write-Host '  START HERE' -ForegroundColor Yellow
     Write-HuntRow 'hunt where X'  'you know WHAT you want, not where it lives  <- start here'
-    Write-HuntRow 'hunt plays'    'the 42 prebuilt hunts, by name'
+    Write-HuntRow 'hunt plays'    'the 44 prebuilt hunts, by name'
     Write-HuntRow 'hunt sources'  'which logs exist on this host, and how full they are'
     Write-HuntRow 'hunt ids X'    'cheat sheet: "hunt ids sysmon", or "hunt ids 4625"'
     Write-Host ''

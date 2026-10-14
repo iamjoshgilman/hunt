@@ -139,3 +139,20 @@ New-MockEvent -Log 'System' -Id 7045 -Time $now.AddMinutes(-7) -Data ([ordered]@
 
 New-MockEvent -Log 'System' -Id 1074 -Time $now.AddHours(-30) -Data ([ordered]@{
     param1='C:\Windows\System32\shutdown.exe'; param2='LAB\jdoe'; param3='No title for this reason could be found' }) | Out-Null
+
+# --- Event 7 image loads: for the hijack and dotnet plays --------------------
+# DLL hijack: unsigned DismCore.dll from a drop dir, loaded by dism.exe.
+New-MockEvent -Log $SY -Id 7 -Time $now.AddMinutes(-12) -Data ([ordered]@{
+    Image='C:\Windows\System32\dism.exe'
+    ImageLoaded='C:\ProgramData\DismCore.dll'
+    Signed='false'; SignatureStatus='Unavailable' }) | Out-Null
+# Normal signed System32 load - must NOT be flagged as a hijack.
+New-MockEvent -Log $SY -Id 7 -Time $now.AddMinutes(-13) -Data ([ordered]@{
+    Image='C:\Windows\explorer.exe'
+    ImageLoaded='C:\Windows\System32\shell32.dll'
+    Signed='true'; SignatureStatus='Valid' }) | Out-Null
+# Unmanaged PowerShell: spoolsv loads the CLR.
+New-MockEvent -Log $SY -Id 7 -Time $now.AddMinutes(-14) -Data ([ordered]@{
+    Image='C:\Windows\System32\spoolsv.exe'
+    ImageLoaded='C:\Windows\Microsoft.NET\Framework64\v4.0.30319\clrjit.dll'
+    Signed='true'; SignatureStatus='Valid' }) | Out-Null
